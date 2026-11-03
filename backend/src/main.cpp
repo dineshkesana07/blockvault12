@@ -380,17 +380,23 @@ int main() {
             int parsed = std::stoi(envPort);
             if (parsed > 0 && parsed <= 65535) {
                 port = static_cast<uint16_t>(parsed);
+            } else {
+                std::cerr << "[Warning] Invalid PORT value: " << envPort << ". Using default: " << port << std::endl;
             }
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            std::cerr << "[Warning] Failed to parse PORT: " << envPort << ". Using default: " << port << std::endl;
+        }
     }
 
-    // Read bind address: default 127.0.0.1 locally, can bind to 0.0.0.0 on Render via HOST env var
-    std::string bindAddr = "127.0.0.1";
+    // Read bind address: default 0.0.0.0 to bind on all network interfaces (required for Render & Docker)
+    std::string bindAddr = "0.0.0.0";
     const char* envHost = std::getenv("HOST");
     if (envHost && std::string(envHost).length() > 0) {
         bindAddr = envHost;
     }
 
+    std::cout << "[Server] Configured host: " << bindAddr << std::endl;
+    std::cout << "[Server] Configured port: " << port << std::endl;
     std::cout << "[Server] Listening on http://" << bindAddr << ":" << port << std::endl;
     app.bindaddr(bindAddr).port(port).multithreaded().run();
 

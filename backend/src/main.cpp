@@ -372,8 +372,8 @@ int main() {
         }
     );
 
-    // Read port from environment variable PORT (if set), default to 10000
-    uint16_t port = 10000;
+    // Read port from environment variable PORT (if set), default to 18080 locally
+    uint16_t port = 18080;
     const char* envPort = std::getenv("PORT");
     if (envPort) {
         try {
@@ -384,8 +384,8 @@ int main() {
         } catch (...) {}
     }
 
-    // Read bind address: default 0.0.0.0 for production (Render requires this)
-    std::string bindAddr = "0.0.0.0";
+    // Read bind address: default 127.0.0.1 locally, can bind to 0.0.0.0 on Render via HOST env var
+    std::string bindAddr = "127.0.0.1";
     const char* envHost = std::getenv("HOST");
     if (envHost && std::string(envHost).length() > 0) {
         bindAddr = envHost;

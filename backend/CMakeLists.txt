@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.15)
 project(BlockVaultBackend CXX C)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -57,7 +58,7 @@ add_executable(blockvault_server
 )
 
 target_include_directories(blockvault_server PRIVATE
-    include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ASIO_INCLUDE_DIR}
     ${sqlite3_SOURCE_DIR}
     ${SODIUM_DIR}/src/libsodium/include

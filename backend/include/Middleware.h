@@ -4,6 +4,7 @@
 #include "Auth.h"
 #include "Encryption.h"
 #include "crow.h"
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -51,7 +52,14 @@ struct CORSMiddleware {
 
   void after_handle(crow::request &req, crow::response &res,
                     context & /*ctx*/) {
-    res.add_header("Access-Control-Allow-Origin", "*");
+    // Read allowed origin from FRONTEND_ORIGIN env var; default to "*"
+    std::string allowedOrigin = "*";
+    const char* envOrigin = std::getenv("FRONTEND_ORIGIN");
+    if (envOrigin && std::string(envOrigin).length() > 0) {
+        allowedOrigin = envOrigin;
+    }
+
+    res.add_header("Access-Control-Allow-Origin", allowedOrigin);
     res.add_header("Access-Control-Allow-Methods",
                    "GET, POST, PUT, DELETE, OPTIONS");
     res.add_header("Access-Control-Allow-Headers",

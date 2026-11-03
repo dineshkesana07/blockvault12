@@ -1,0 +1,29 @@
+# ==============================================================================
+# BLOCKVAULT - Render Blueprint (render.yaml)
+# ==============================================================================
+# Place this file at the ROOT of your repository (CPP Project/)
+# Render will auto-detect it and configure the service.
+
+services:
+  - type: web
+    name: blockvault-api
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    region: oregon
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: DB_PATH
+        value: /var/data/blockvault.db
+      - key: HOST
+        value: "0.0.0.0"
+      - key: FRONTEND_ORIGIN
+        sync: false  # Set this manually in Render dashboard to your frontend URL
+    disk:
+      name: blockvault-data
+      mountPath: /var/data
+      sizeGB: 1
+

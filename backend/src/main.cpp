@@ -15,9 +15,18 @@ int main() {
     std::cout << "   BLOCKVAULT C++ Backend Server Starting" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // 1. Ensure database directory exists
-    std::filesystem::create_directories("database");
+    // 1. Read DB_PATH from environment (default: database/blockvault.db)
     std::string dbPath = "database/blockvault.db";
+    const char* envDbPath = std::getenv("DB_PATH");
+    if (envDbPath && std::string(envDbPath).length() > 0) {
+        dbPath = envDbPath;
+    }
+
+    // Ensure the parent directory for the database file exists
+    std::filesystem::path dbFilePath(dbPath);
+    if (dbFilePath.has_parent_path()) {
+        std::filesystem::create_directories(dbFilePath.parent_path());
+    }
 
     // 2. Initialize Database
     auto db = std::make_shared<Database>(dbPath);
@@ -363,8 +372,8 @@ int main() {
         }
     );
 
-    // Read port from environment variable PORT (if set), default to 8080
-    uint16_t port = 8080;
+    // Read port from environment variable PORT (if set), default to 10000
+    uint16_t port = 10000;
     const char* envPort = std::getenv("PORT");
     if (envPort) {
         try {
@@ -375,8 +384,15 @@ int main() {
         } catch (...) {}
     }
 
-    std::cout << "[Server] Listening on http://127.0.0.1:" << port << std::endl;
-    app.port(port).multithreaded().run();
+    // Read bind address: default 0.0.0.0 for production (Render requires this)
+    std::string bindAddr = "0.0.0.0";
+    const char* envHost = std::getenv("HOST");
+    if (envHost && std::string(envHost).length() > 0) {
+        bindAddr = envHost;
+    }
+
+    std::cout << "[Server] Listening on http://" << bindAddr << ":" << port << std::endl;
+    app.bindaddr(bindAddr).port(port).multithreaded().run();
 
     return 0;
 }

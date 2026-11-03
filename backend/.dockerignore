@@ -1,0 +1,55 @@
+# Build artifacts
+build/
+.cache/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+.clangd
+
+# Runtime databases (not needed at build time)
+database/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Pre-compiled binaries (we build fresh inside Docker)
+*.o
+*.obj
+*.exe
+*.out
+*.dll
+*.so
+*.dylib
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.a
+
+# Downloaded dependency archives (Dockerfile downloads its own)
+*.tar.gz
+*.zip
+libsodium-1.0.20-RELEASE/
+asio-asio-1-30-2/
+
+# CMakeLists_linux.cmake scratch (if any)
+CMakeLists_linux.cmake

@@ -8,7 +8,7 @@
 # Stage 1: Build
 FROM debian:bookworm-slim AS builder
 
-# Install build tools and download utilities
+# Install build tools, compiler, autotools, pkg-config, and utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -23,102 +23,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     xz-utils \
     unzip \
+    file \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # ---------- Download and build libsodium ----------
-RUN curl -L -o libsodium.tar.gz \
-    https://github.com/jedisct1/libsodium/releases/download/1.0.20-RELEASE/libsodium-1.0.20-RELEASE.tar.gz && \
+# Uses official source archive with -fL (fails fast on HTTP errors)
+RUN curl -fL -o libsodium.tar.gz \
+    https://download.libsodium.org/libsodium/releases/libsodium-1.0.20.tar.gz && \
     tar xzf libsodium.tar.gz && \
-    cd libsodium-1.0.20-RELEASE && \
+    cd libsodium-1.0.20 && \
     ./configure --disable-shared --enable-static --prefix=/usr/local && \
     make -j$(nproc) && \
     make install && \
     ldconfig && \
-    cd /app && rm -f libsodium.tar.gz
+    cd /app && rm -rf libsodium-1.0.20 libsodium.tar.gz
+
+# Ensure pkg-config discovers libsodium installed in /usr/local/lib/pkgconfig
+ENV PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH}"
 
 # ---------- Download Asio headers ----------
-RUN curl -L -o asio.tar.gz \
+RUN curl -fL -o asio.tar.gz \
     https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-2.tar.gz && \
     tar xzf asio.tar.gz && \
     rm -f asio.tar.gz
 
-# ---------- Copy application source ----------
+# ---------- Copy application source and build configuration ----------
+COPY CMakeLists.txt ./
 COPY include/ include/
 COPY src/ src/
 
-# ---------- Create Linux CMakeLists.txt ----------
-# Uses system-installed libsodium (built above) and downloads SQLite + nlohmann/json via FetchContent
-RUN cat > CMakeLists.txt << 'CMAKEOF'
-cmake_minimum_required(VERSION 3.15)
-project(BlockVaultBackend CXX C)
-
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-include(FetchContent)
-
-# 1. SQLite3 (amalgamation)
-FetchContent_Declare(
-    sqlite3
-    URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(sqlite3)
-add_library(sqlite3_lib STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
-target_include_directories(sqlite3_lib PUBLIC ${sqlite3_SOURCE_DIR})
-
-# 2. nlohmann/json (header-only)
-FetchContent_Declare(
-    json
-    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(json)
-
-# 3. Asio standalone headers
-set(ASIO_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/asio-asio-1-30-2/asio/include")
-
-# 4. System-installed libsodium
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED IMPORTED_TARGET libsodium)
-
-# 5. Backend executable
-add_executable(blockvault_server
-    src/main.cpp
-    src/Database.cpp
-    src/Auth.cpp
-    src/Encryption.cpp
-    src/Vault.cpp
-    src/Middleware.cpp
-)
-
-target_include_directories(blockvault_server PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${ASIO_INCLUDE_DIR}
-    ${sqlite3_SOURCE_DIR}
-    ${SODIUM_INCLUDE_DIRS}
-    ${json_SOURCE_DIR}/include
-)
-
-target_compile_definitions(blockvault_server PRIVATE
-    CROW_STATIC_DIRECTORY="static"
-    ASIO_STANDALONE
-)
-
-target_link_libraries(blockvault_server PRIVATE
-    sqlite3_lib
-    PkgConfig::SODIUM
-    pthread
-    dl
-)
-CMAKEOF
-
-# ---------- Build ----------
+# ---------- Configure and build with CMake ----------
 RUN cmake -S . -B build -G "Ninja" \
-      -DCMAKE_BUILD_TYPE=Release && \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && \
     cmake --build build --config Release -j$(nproc)
 
 # Verify the binary was produced

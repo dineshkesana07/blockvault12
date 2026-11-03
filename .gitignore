@@ -1,9 +1,22 @@
 # Dependencies
 node_modules/
 
-# Build output
+# Build outputs
 dist/
 build/
+backend/build/
+
+# Downloaded dependency source archives
+backend/*.tar.gz
+backend/libsodium-1.0.20-RELEASE/
+backend/asio-asio-1-30-2/
+
+# SQLite Databases & runtime files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+backend/database/*.db
 
 # Environment variables
 .env
@@ -38,7 +51,4 @@ npm-debug.log*
 *.ilk
 *.exp
 *.lib
-
-# Package lock (optional — remove this line if you want to track it)
-# package-lock.json
-
+*.a

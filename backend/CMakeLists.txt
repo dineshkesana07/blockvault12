@@ -1,0 +1,78 @@
+cmake_minimum_required(VERSION 3.15)
+project(BlockVaultBackend CXX C)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include(FetchContent)
+
+# 1. SQLite3
+FetchContent_Declare(
+    sqlite3
+    URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(sqlite3)
+
+add_library(sqlite3_lib STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
+target_include_directories(sqlite3_lib PUBLIC ${sqlite3_SOURCE_DIR})
+
+# 2. nlohmann/json
+FetchContent_Declare(
+    json
+    URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(json)
+
+# 3. Libsodium from local extracted source
+set(SODIUM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libsodium-1.0.20-RELEASE")
+file(GLOB_RECURSE SODIUM_SOURCES "${SODIUM_DIR}/src/libsodium/*.c")
+
+add_library(sodium_lib STATIC ${SODIUM_SOURCES})
+target_include_directories(sodium_lib PUBLIC
+    ${SODIUM_DIR}/src/libsodium/include
+    ${SODIUM_DIR}/src/libsodium/include/sodium
+)
+target_compile_definitions(sodium_lib PUBLIC
+    SODIUM_STATIC=1
+    CONFIGURED=1
+    HAVE_ARC4RANDOM=0
+    HAVE_ARC4RANDOM_BUF=0
+    HAVE_SYS_MMAN_H=0
+    NATIVE_LITTLE_ENDIAN=1
+)
+
+# 4. Asio standalone include path
+set(ASIO_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/asio-asio-1-30-2/asio/include")
+
+# 5. Backend Executable (Crow REST API Server)
+add_executable(blockvault_server
+    src/main.cpp
+    src/Database.cpp
+    src/Auth.cpp
+    src/Encryption.cpp
+    src/Vault.cpp
+    src/Middleware.cpp
+)
+
+target_include_directories(blockvault_server PRIVATE
+    include
+    ${ASIO_INCLUDE_DIR}
+    ${sqlite3_SOURCE_DIR}
+    ${SODIUM_DIR}/src/libsodium/include
+    ${json_SOURCE_DIR}/include
+)
+
+target_compile_definitions(blockvault_server PRIVATE
+    CROW_STATIC_DIRECTORY="static"
+    _WIN32_WINNT=0x0601
+    ASIO_STANDALONE
+)
+
+target_link_libraries(blockvault_server PRIVATE
+    sqlite3_lib
+    sodium_lib
+    ws2_32
+    mswsock
+)

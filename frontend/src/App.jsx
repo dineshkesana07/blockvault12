@@ -11,8 +11,8 @@ import Navbar from './components/Navbar';
 function App() {
   return (
     <AuthProvider>
-      <Navbar />
-        <Router>
+      <Router>
+        <Navbar />
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/signup" element={<Signup />} />
@@ -32,4 +32,3 @@ function App() {
 }
 
 export default App;
-

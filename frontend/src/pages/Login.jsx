@@ -1,27 +1,77 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { authAPI } from '../services/api';
 
 export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    const username = e.target.username.value;
-    // Dummy login – replace with real API call later
-    login({ username });
-    navigate('/dashboard');
+    setError('');
+    const email = e.target.username.value.trim();
+    const password = e.target.password.value;
+
+    if (!email || !password) {
+      setError('Please enter your email and master password.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await authAPI.login(email, password);
+      if (res.data && res.data.token) {
+        login(res.data.user || { name: email, email }, res.data.token);
+        navigate('/dashboard');
+      } else {
+        setError('Login failed. Please check your credentials.');
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Login failed.';
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-black text-white">
       <div className="p-8 bg-white text-black rounded-lg shadow-lg max-w-md w-full">
         <h2 className="text-2xl font-bold mb-4">Login</h2>
+        {error && (
+          <div className="mb-4 p-2 bg-red-100 border border-red-400 text-red-700 text-sm rounded">
+            {error}
+          </div>
+        )}
         <form onSubmit={handleSubmit}>
-          <input name="username" className="border p-2 w-full mb-2" placeholder="Username or Email" />
-          <input name="password" type="password" className="border p-2 w-full mb-4" placeholder="Master Password" />
-          <button type="submit" className="bg-green-500 text-white px-4 py-2 rounded w-full">Login</button>
+          <input
+            name="username"
+            type="text"
+            className="border p-2 w-full mb-2"
+            placeholder="Username or Email"
+            autoComplete="email"
+            required
+            disabled={loading}
+          />
+          <input
+            name="password"
+            type="password"
+            className="border p-2 w-full mb-4"
+            placeholder="Master Password"
+            autoComplete="current-password"
+            required
+            disabled={loading}
+          />
+          <button
+            type="submit"
+            className="bg-green-500 text-white px-4 py-2 rounded w-full disabled:opacity-50"
+            disabled={loading}
+          >
+            {loading ? 'Logging in...' : 'Login'}
+          </button>
         </form>
         <p className="mt-4 text-center">
           No account? <Link to="/signup" className="text-red-500 underline">Sign up</Link>
@@ -30,4 +80,3 @@ export default function Login() {
     </div>
   );
 }
-

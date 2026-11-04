@@ -1,9 +1,15 @@
 import axios from 'axios';
 
-// Centralized API Base URL configured via import.meta.env.VITE_API_URL
-// If not specified, falls back to empty string (relative paths / same-origin proxy)
-const rawUrl = (import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || '').trim();
-export const API_BASE_URL = rawUrl.replace(/\/+$/, '');
+// Centralized API Base URL configured via Vite environment variable VITE_API_BASE_URL
+// Defaults to the deployed Render backend: https://blockvault12.onrender.com
+const envBaseUrl = (
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API_URL ||
+  'https://blockvault12.onrender.com'
+).trim();
+
+// Strip trailing slashes to ensure uniform path resolution
+export const API_BASE_URL = envBaseUrl.replace(/\/+$/, '');
 
 // Create Axios instance
 const api = axios.create({
@@ -14,7 +20,13 @@ const api = axios.create({
   timeout: 15000,
 });
 
-// Helper to resolve API path whether API_BASE_URL includes '/api' or not
+/**
+ * Normalizes endpoint paths to prevent duplicate '/api' prefixes:
+ * - If API_BASE_URL already ends with '/api' (e.g. 'https://blockvault12.onrender.com/api'),
+ *   calling resolveApiPath('/api/vault') strips '/api' -> '/vault'.
+ * - If API_BASE_URL does not end with '/api' (e.g. 'https://blockvault12.onrender.com'),
+ *   calling resolveApiPath('/api/vault') returns '/api/vault'.
+ */
 export const resolveApiPath = (path) => {
   const cleanPath = path.startsWith('/') ? path : `/${path}`;
   if (API_BASE_URL.endsWith('/api')) {
@@ -23,7 +35,7 @@ export const resolveApiPath = (path) => {
   return cleanPath.startsWith('/api') ? cleanPath : `/api${cleanPath}`;
 };
 
-// Request interceptor: attach JWT Bearer token from localStorage or sessionStorage
+// Request interceptor: attach JWT Bearer token from storage without logging sensitive material
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('blockvault_token') || sessionStorage.getItem('blockvault_token');
@@ -35,7 +47,7 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response interceptor: handle 401 unauthorized / expired session
+// Response interceptor: automatically invalidate expired sessions on HTTP 401
 api.interceptors.response.use(
   (response) => response,
   (error) => {
@@ -101,4 +113,3 @@ export const healthAPI = {
 };
 
 export default api;
-

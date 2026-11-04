@@ -1,186 +1,241 @@
 
 #include "Middleware.h"
 
-#include <iostream>
+#include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <unordered_set>
 #include <utility>
 
-// Internal helper functions
+// =====================================================
+// CORS Helper Functions
+// =====================================================
+
 namespace {
 
-const char *const localFrontendOrigin = "http://localhost:5174";
+    // Local development frontend.
+    const char* const localFrontendOrigin =
+        "http://localhost:5174";
 
-const char *const allowedMethods = "GET, POST, PUT, DELETE, OPTIONS";
+    const char* const allowedMethods =
+        "GET, POST, PUT, DELETE, OPTIONS";
 
-const char *const allowedHeaders = "Content-Type, Authorization";
+    const char* const allowedHeaders =
+        "Content-Type, Authorization";
 
-std::string trim(const std::string &value) {
-  const auto first = value.find_first_not_of(" \t\r\n");
+    // Remove whitespace from both ends.
+    std::string trim(const std::string& value) {
 
-  if (first == std::string::npos)
-    return {};
+        const auto first =
+            value.find_first_not_of(" \t\r\n");
 
-  const auto last = value.find_last_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            return {};
 
-  return value.substr(0, last - first + 1);
+        const auto last =
+            value.find_last_not_of(" \t\r\n");
+
+        return value.substr(first, last - first + 1);
+    }
+
+    // Get allowed frontend origins.
+    std::unordered_set<std::string> getAllowedOrigins() {
+
+        std::unordered_set<std::string> origins{
+            localFrontendOrigin
+        };
+
+        const char* envOrigins =
+            std::getenv("FRONTEND_ORIGIN");
+
+        if (!envOrigins || *envOrigins == '\0')
+            return origins;
+
+        std::stringstream ss(envOrigins);
+
+        std::string origin;
+
+        while (std::getline(ss, origin, ',')) {
+
+            origin = trim(origin);
+
+            if (!origin.empty()) {
+                origins.insert(origin);
+            }
+        }
+
+        return origins;
+    }
+
+    // Add CORS headers to HTTP response.
+  
+void addCorsHeaders(
+    const crow::request& req,
+    crow::response& res
+) {
+    const std::string origin =
+        req.get_header_value("Origin");
+
+    const auto allowedOrigins = getAllowedOrigins();
+
+    if (!origin.empty() && allowedOrigins.count(origin)) {
+        res.set_header(
+            "Access-Control-Allow-Origin",
+            origin
+        );
+    }
+
+    res.set_header(
+        "Access-Control-Allow-Methods",
+        allowedMethods
+    );
+
+    res.set_header(
+        "Access-Control-Allow-Headers",
+        allowedHeaders
+    );
+
+    res.set_header("Access-Control-Max-Age", "86400");
+    res.set_header("Vary", "Origin");
 }
 
-std::unordered_set<std::string> getAllowedOrigins() {
 
-  std::unordered_set<std::string> origins{localFrontendOrigin};
+} // End anonymous namespace
 
-  const char *envOrigins = std::getenv("FRONTEND_ORIGIN");
 
-  if (!envOrigins || *envOrigins == '\0')
-    return origins;
-
-  std::stringstream ss(envOrigins);
-  std::string origin;
-
-  while (std::getline(ss, origin, ',')) {
-
-    origin = trim(origin);
-
-    if (!origin.empty())
-      origins.insert(origin);
-  }
-
-  return origins;
-}
-
-void addCorsHeaders(const crow::request &req, crow::response &res) {
-
-  const std::string origin = req.get_header_value("Origin");
-
-  const auto allowedOrigins = getAllowedOrigins();
-
-  if (origin.empty()) {
-
-    res.set_header("Access-Control-Allow-Origin", localFrontendOrigin);
-
-  } else if (allowedOrigins.count(origin)) {
-
-    res.set_header("Access-Control-Allow-Origin", origin);
-  }
-
-  res.set_header("Access-Control-Allow-Methods", allowedMethods);
-
-  res.set_header("Access-Control-Allow-Headers", allowedHeaders);
-
-  res.set_header("Access-Control-Max-Age", "86400");
-
-  res.set_header("Vary", "Origin");
-}
-
-} // namespace
-
-// ==========================================
+// =====================================================
 // SessionKeyStore Implementation
-// ==========================================
+// =====================================================
 
-SessionKeyStore &SessionKeyStore::instance() {
+SessionKeyStore& SessionKeyStore::instance() {
 
-  static SessionKeyStore store;
+    static SessionKeyStore store;
 
-  return store;
+    return store;
 }
 
-void SessionKeyStore::storeKey(const std::string &token, SecureKey &&key) {
 
-  std::lock_guard<std::mutex> lock(m_mutex);
-
-  m_keyStore[token] = std::make_shared<SecureKey>(std::move(key));
-}
-
-std::shared_ptr<SecureKey> SessionKeyStore::getKey(const std::string &token) {
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-
-  auto it = m_keyStore.find(token);
-
-  if (it == m_keyStore.end())
-    return nullptr;
-
-  return it->second;
-}
-
-void SessionKeyStore::removeKey(const std::string &token) {
-
-  std::lock_guard<std::mutex> lock(m_mutex);
-
-  m_keyStore.erase(token);
-}
-
-// ==========================================
-// CORS Middleware Implementation
-// ==========================================
-
-void CORSMiddleware::before_handle(crow::request &req, crow::response &res,
-                                   context & /*ctx*/
+void SessionKeyStore::storeKey(
+    const std::string& token,
+    SecureKey&& key
 ) {
 
-  if (req.method == crow::HTTPMethod::Options) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    m_keyStore[token] =
+        std::make_shared<SecureKey>(std::move(key));
+}
+
+
+std::shared_ptr<SecureKey> SessionKeyStore::getKey(
+    const std::string& token
+) {
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto it = m_keyStore.find(token);
+
+    if (it == m_keyStore.end())
+        return nullptr;
+
+    return it->second;
+}
+
+
+void SessionKeyStore::removeKey(
+    const std::string& token
+) {
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    m_keyStore.erase(token);
+}
+
+
+// =====================================================
+// CORS Middleware Implementation
+// =====================================================
+
+void CORSMiddleware::before_handle(
+    crow::request& req,
+    crow::response& res,
+    context& /*ctx*/
+) {
+
+    if (req.method == crow::HTTPMethod::Options) {
+
+        addCorsHeaders(req, res);
+
+        res.code = 204;
+        res.body.clear();
+
+        res.end();
+    }
+}
+
+
+void CORSMiddleware::after_handle(
+    crow::request& req,
+    crow::response& res,
+    context& /*ctx*/
+) {
 
     addCorsHeaders(req, res);
 
-    res.code = 204;
-    res.body.clear();
+    if (req.method == crow::HTTPMethod::Options) {
 
-    res.end();
-  }
+        res.code = 204;
+        res.body.clear();
+    }
 }
 
-void CORSMiddleware::after_handle(crow::request &req, crow::response &res,
-                                  context & /*ctx*/
+
+// =====================================================
+// Authentication Middleware Implementation
+// =====================================================
+
+std::optional<UserSessionContext> authenticateRequest(
+    const crow::request& req,
+    std::shared_ptr<Auth> auth
 ) {
 
-  addCorsHeaders(req, res);
+    // Check Auth availability.
+    if (!auth)
+        return std::nullopt;
 
-  if (req.method == crow::HTTPMethod::Options) {
+    // Read Authorization header.
+    const std::string authHeader =
+        req.get_header_value("Authorization");
 
-    res.code = 204;
-    res.body.clear();
-  }
-}
+    // Verify Bearer token format.
+    if (authHeader.rfind("Bearer ", 0) != 0)
+        return std::nullopt;
 
-// ==========================================
-// Authentication Middleware Implementation
-// ==========================================
+    // Extract token.
+    const std::string token =
+        authHeader.substr(7);
 
-std::optional<UserSessionContext>
-authenticateRequest(const crow::request &req, std::shared_ptr<Auth> auth) {
+    if (token.empty())
+        return std::nullopt;
 
-  // Check whether Auth is available.
-  if (!auth)
-    return std::nullopt;
+    // Validate token.
+    auto session = auth->validateToken(token);
 
-  // Read Authorization header.
-  const std::string authHeader = req.get_header_value("Authorization");
+    if (!session.has_value())
+        return std::nullopt;
 
-  // Check Bearer token format.
-  if (authHeader.rfind("Bearer ", 0) != 0)
-    return std::nullopt;
+    // Create user session context.
+    UserSessionContext userContext;
 
-  // Extract token.
-  const std::string token = authHeader.substr(7);
+    userContext.user_id = session->user_id;
 
-  if (token.empty())
-    return std::nullopt;
+    userContext.email = session->email;
 
-  // Validate token using Auth class.
-  auto session = auth->validateToken(token);
+    // Retrieve decrypted vault key.
+    userContext.vault_key =
+        SessionKeyStore::instance().getKey(token);
 
-  if (!session.has_value())
-    return std::nullopt;
-
-  // Create authenticated user context.
-  UserSessionContext userContext;
-
-  userContext.user_id = session->user_id;
-
-  userContext.email = session->email;
-
-  // Retrieve decrypted vault key from session storage.
-  userContext.vault_key = SessionKeyStore::instance().getKey(token);
-
-  return userContext;
+    return userContext;
 }

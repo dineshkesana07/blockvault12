@@ -1,9 +1,17 @@
-import React, { createContext, useState, useContext, useEffect } from 'react';
+
+import React, {
+  createContext,
+  useState,
+  useContext,
+  useEffect
+} from 'react';
+
 import { authAPI } from '../services/api';
 
-const AuthContext = createContext();
+const AuthContext = createContext(null);
 
 export const AuthProvider = ({ children }) => {
+
   const [user, setUser] = useState(() => {
     try {
       const savedUser = localStorage.getItem('blockvault_user');
@@ -13,57 +21,120 @@ export const AuthProvider = ({ children }) => {
     }
   });
 
-  const [token, setToken] = useState(() => {
-    return localStorage.getItem('blockvault_token') || null;
-  });
+  const [token, setToken] = useState(
+    () => localStorage.getItem('blockvault_token') || null
+  );
 
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(
+    () => !!localStorage.getItem('blockvault_token')
+  );
 
-  // Validate or refresh session on mount if token exists
+  // Verify session with backend whenever token changes
   useEffect(() => {
-    if (token) {
-      authAPI.getMe()
-        .then((res) => {
-          if (res.data) {
-            setUser(res.data);
-            localStorage.setItem('blockvault_user', JSON.stringify(res.data));
-          }
-        })
-        .catch(() => {
-          // Token expired or invalid
-          logout();
-        });
-    }
+    let active = true;
+
+    const verifySession = async () => {
+
+      if (!token) {
+        setUser(null);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+
+      try {
+        const res = await authAPI.getMe();
+
+        if (active && res.data) {
+          setUser(res.data);
+          localStorage.setItem(
+            'blockvault_user',
+            JSON.stringify(res.data)
+          );
+        }
+
+      } catch (error) {
+
+        if (active) {
+          setUser(null);
+          setToken(null);
+
+          localStorage.removeItem('blockvault_token');
+          localStorage.removeItem('blockvault_user');
+
+          sessionStorage.removeItem('blockvault_token');
+          sessionStorage.removeItem('blockvault_user');
+        }
+
+      } finally {
+        if (active) {
+          setLoading(false);
+        }
+      }
+    };
+
+    verifySession();
+
+    return () => {
+      active = false;
+    };
+
   }, [token]);
 
+  // Login
   const login = (userData, authToken) => {
-    if (typeof userData === 'object' && userData !== null) {
-      setUser(userData);
-      localStorage.setItem('blockvault_user', JSON.stringify(userData));
+
+    if (!authToken) {
+      return;
     }
-    if (authToken) {
-      setToken(authToken);
-      localStorage.setItem('blockvault_token', authToken);
+
+    setUser(userData || null);
+    setToken(authToken);
+    setLoading(false);
+
+    localStorage.setItem('blockvault_token', authToken);
+
+    if (userData) {
+      localStorage.setItem(
+        'blockvault_user',
+        JSON.stringify(userData)
+      );
     }
   };
 
+  // Logout
   const logout = async () => {
+
     try {
       await authAPI.logout();
-    } catch {
-      // Ignore network errors on logout
+    } catch (error) {
+      console.error('Logout request failed:', error);
     } finally {
+
       setUser(null);
       setToken(null);
+      setLoading(false);
+
       localStorage.removeItem('blockvault_token');
-      sessionStorage.removeItem('blockvault_token');
       localStorage.removeItem('blockvault_user');
+
+      sessionStorage.removeItem('blockvault_token');
       sessionStorage.removeItem('blockvault_user');
     }
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, isAuthenticated: !!token, login, logout }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        token,
+        loading,
+        isAuthenticated: !!user && !!token,
+        login,
+        logout
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

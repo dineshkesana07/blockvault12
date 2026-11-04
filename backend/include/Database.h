@@ -2,7 +2,6 @@
 #define DATABASE_H
 
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <optional>
 #include <sqlite3.h>

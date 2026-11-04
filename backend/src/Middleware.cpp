@@ -1,24 +1,23 @@
 #include "Middleware.h"
-#include <iostream>
+#include <cstdlib>
 #include <sstream>
+#include <unordered_set>
 
-namespace {
-
-const char* const defaultOrigins[] = {
+static const char* const defaultOrigins[] = {
     "http://localhost:5174",
     "http://localhost:5173"
 };
-const char* const allowedMethods = "GET, POST, PUT, DELETE, OPTIONS";
-const char* const allowedHeaders = "Content-Type, Authorization, X-Requested-With, Accept, Origin";
+static const char* const allowedMethods = "GET, POST, PUT, DELETE, OPTIONS";
+static const char* const allowedHeaders = "Content-Type, Authorization, X-Requested-With, Accept, Origin";
 
-std::string trim(const std::string& value) {
+static std::string trim(const std::string& value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return {};
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1);
 }
 
-std::unordered_set<std::string> getAllowedOrigins() {
+static std::unordered_set<std::string> getAllowedOrigins() {
     std::unordered_set<std::string> origins;
     for (const auto* orig : defaultOrigins) {
         origins.insert(orig);
@@ -40,7 +39,7 @@ std::unordered_set<std::string> getAllowedOrigins() {
     return origins;
 }
 
-void addCorsHeaders(const crow::request& req, crow::response& res) {
+void CORSMiddleware::addCorsHeaders(const crow::request& req, crow::response& res) {
     const std::string origin = req.get_header_value("Origin");
     const auto allowedOrigins = getAllowedOrigins();
 
@@ -56,7 +55,10 @@ void addCorsHeaders(const crow::request& req, crow::response& res) {
     res.set_header("Vary", "Origin");
 }
 
-} // namespace
+// File-scope helper declared and defined before any usage
+static void addCorsHeaders(const crow::request& req, crow::response& res) {
+    CORSMiddleware::addCorsHeaders(req, res);
+}
 
 void CORSMiddleware::before_handle(crow::request& req, crow::response& res,
                                    context& /*ctx*/) {

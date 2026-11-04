@@ -5,7 +5,7 @@ import axios from 'axios';
 const envBaseUrl = (
   import.meta.env.VITE_API_BASE_URL ||
   import.meta.env.VITE_API_URL ||
-  'https://blockvault12.onrender.com'
+  'http://localhost:10000'
 ).trim();
 
 // Strip trailing slashes to ensure uniform path resolution

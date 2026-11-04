@@ -1,6 +1,6 @@
 #include "Database.h"
 #include <iostream>
-#include <sstream>
+#include <memory>
 #include <set>
 
 namespace {

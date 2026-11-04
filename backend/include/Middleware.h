@@ -4,15 +4,12 @@
 #include "Auth.h"
 #include "Encryption.h"
 #include "crow.h"
-#include <cstdlib>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 /**
  * @brief Context storing authenticated session information and decrypted vault
@@ -53,6 +50,8 @@ struct CORSMiddleware {
 
   void before_handle(crow::request &req, crow::response &res, context &ctx);
   void after_handle(crow::request &req, crow::response &res, context &ctx);
+
+  static void addCorsHeaders(const crow::request &req, crow::response &res);
 };
 
 /**

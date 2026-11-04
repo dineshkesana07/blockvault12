@@ -44,8 +44,9 @@ private:
 };
 
 /**
- * @brief Crow CORS Middleware allowing cross-origin requests from React
- * frontend.
+ * @brief Crow CORS Middleware allowing cross-origin requests from the React frontend.
+ * Preflight OPTIONS requests are handled in before_handle() with HTTP 204.
+ * Appropriate CORS headers are added to all responses in after_handle().
  */
 struct CORSMiddleware {
   struct context {};
@@ -55,8 +56,8 @@ struct CORSMiddleware {
 };
 
 /**
- * @brief Helper function to extract and validate Bearer token from request
- * headers.
+ * @brief Helper function to extract and validate Bearer token from request headers.
+ * Ensures the session token is valid and an in-memory vault key is present.
  */
 std::optional<UserSessionContext>
 authenticateRequest(const crow::request &req, std::shared_ptr<Auth> auth);

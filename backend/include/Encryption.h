@@ -5,14 +5,15 @@
 #include <vector>
 #include <optional>
 #include <memory>
+#include <cstdint>
 #include <sodium.h>
 
 /**
  * @brief Represents the output of an authenticated encryption operation.
- * Both ciphertext and nonce are encoded in hex or base64 for safe transport and storage.
+ * Both ciphertext and nonce are encoded in hex for safe transport and storage.
  */
 struct EncryptedPayload {
-    std::string ciphertext_hex; // Hex-encoded ciphertext with poly1305 authentication tag
+    std::string ciphertext_hex; // Hex-encoded ciphertext with Poly1305 authentication tag
     std::string nonce_hex;      // Hex-encoded 192-bit unique random nonce (24 bytes)
 };
 
@@ -50,6 +51,11 @@ private:
 class Encryption {
 public:
     /**
+     * @brief Checks if libsodium is properly initialized.
+     */
+    static bool isInitialized();
+
+    /**
      * @brief Generates a cryptographically secure random 16-byte salt (for Argon2id key derivation).
      * @return Hex-encoded salt string (32 characters).
      */
@@ -69,17 +75,17 @@ public:
      * - The key is kept ONLY in memory for the duration of the unlocked session and NEVER written to disk.
      *
      * @param masterPassword The plain-text master password.
-     * @param saltHex Hex-encoded salt (16 bytes).
-     * @return SecureKey object containing the derived key in protected memory.
+     * @param saltHex Hex-encoded salt (16 bytes = 32 hex chars).
+     * @return SecureKey object containing the derived key in protected memory (isValid() == true on success).
      */
     static SecureKey deriveVaultKey(const std::string& masterPassword, const std::string& saltHex);
 
     /**
      * @brief Encrypts plain-text data using XChaCha20-Poly1305 with a random 24-byte nonce.
      * 
-     * @param plaintext Data to encrypt (e.g. website password or sensitive notes).
+     * @param plaintext Data to encrypt (e.g. JSON string of credential fields).
      * @param key 256-bit vault encryption key derived from master password.
-     * @param additionalData Optional metadata authenticated by Poly1305 (e.g. user_id string).
+     * @param additionalData Authenticated Additional Data (AAD) containing user ID and version.
      * @return std::optional<EncryptedPayload> containing hex-encoded ciphertext and nonce.
      */
     static std::optional<EncryptedPayload> encrypt(
@@ -95,11 +101,12 @@ public:
      * - Nonce or ciphertext format is corrupted.
      * - Poly1305 MAC verification fails (tampering detection).
      * - Master key / derived key is incorrect.
+     * - AAD does not match what was provided during encryption.
      *
      * @param ciphertextHex Hex-encoded ciphertext + tag.
      * @param nonceHex Hex-encoded 24-byte nonce.
      * @param key 256-bit vault encryption key.
-     * @param additionalData Optional metadata that was authenticated during encryption.
+     * @param additionalData Authenticated Additional Data (AAD).
      * @return std::optional<std::string> plain-text on success, std::nullopt on authentication failure.
      */
     static std::optional<std::string> decrypt(
@@ -110,12 +117,19 @@ public:
     );
 
     /**
+     * @brief Constructs standardized Authenticated Additional Data (AAD) binding ciphertext to owner.
+     * Format: "blockvault:v<version>:uid=<userId>"
+     */
+    static std::string makeAAD(int64_t userId, int version = 2);
+
+    /**
      * @brief Utility: Converts raw binary bytes to hexadecimal string.
      */
     static std::string toHex(const unsigned char* data, size_t length);
 
     /**
      * @brief Utility: Converts hexadecimal string to raw binary byte vector.
+     * Validates input: returns empty vector if hexStr has odd length or contains invalid hex characters.
      */
     static std::vector<unsigned char> fromHex(const std::string& hexStr);
 
@@ -126,4 +140,3 @@ public:
 };
 
 #endif // ENCRYPTION_H
-

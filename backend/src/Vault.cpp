@@ -2,6 +2,9 @@
 #include <iostream>
 #include <algorithm>
 #include <cctype>
+#include <nlohmann/json.hpp>
+
+using json = nlohmann::json;
 
 Vault::Vault(std::shared_ptr<Database> db)
     : m_db(std::move(db)) {}
@@ -11,10 +14,40 @@ bool Vault::validateInput(const CredentialInputDTO& input, std::string& outError
         outError = "Website name cannot be empty.";
         return false;
     }
+    if (input.website.length() > 255) {
+        outError = "Website name is too long (maximum 255 characters).";
+        return false;
+    }
+
     if (input.username.empty()) {
         outError = "Username or email cannot be empty.";
         return false;
     }
+    if (input.username.length() > 255) {
+        outError = "Username is too long (maximum 255 characters).";
+        return false;
+    }
+
+    if (input.website_url.length() > 2048) {
+        outError = "Website URL is too long (maximum 2048 characters).";
+        return false;
+    }
+
+    if (input.password.length() > 4096) {
+        outError = "Password is too long (maximum 4096 characters).";
+        return false;
+    }
+
+    if (input.category.length() > 100) {
+        outError = "Category is too long (maximum 100 characters).";
+        return false;
+    }
+
+    if (input.notes.length() > 10000) {
+        outError = "Notes is too long (maximum 10000 characters).";
+        return false;
+    }
+
     return true;
 }
 
@@ -22,35 +55,68 @@ std::optional<CredentialDTO> Vault::decryptRecord(
     const VaultEntryRecord& record,
     const SecureKey& vaultKey
 ) const {
-    // Decrypt the stored password ciphertext using XChaCha20-Poly1305
-    std::string additionalData = std::to_string(record.user_id);
+    CredentialDTO dto;
+    dto.id = record.id;
+    dto.user_id = record.user_id;
+    dto.created_at = record.created_at;
+    dto.updated_at = record.updated_at;
+    dto.is_favorite = record.is_favorite;
+
+    // Modern V2 encrypted record (all sensitive fields encrypted together)
+    if (record.encryption_version >= 2 || !record.encrypted_data.empty()) {
+        std::string aad = Encryption::makeAAD(record.user_id, record.encryption_version);
+        auto decryptedOpt = Encryption::decrypt(
+            record.encrypted_data,
+            record.data_nonce,
+            vaultKey,
+            aad
+        );
+
+        if (!decryptedOpt.has_value()) {
+            std::cerr << "[Vault Error] Authenticated decryption failed for entry ID: " << record.id << std::endl;
+            return std::nullopt;
+        }
+
+        try {
+            json payload = json::parse(decryptedOpt.value());
+            dto.website = payload.value("website", "");
+            dto.website_url = payload.value("website_url", "");
+            dto.username = payload.value("username", "");
+            dto.password = payload.value("password", "");
+            dto.category = payload.value("category", "General");
+            dto.notes = payload.value("notes", "");
+        } catch (const std::exception& e) {
+            std::cerr << "[Vault Error] Failed to parse decrypted JSON for entry ID " << record.id << ": " << e.what() << std::endl;
+            return std::nullopt;
+        }
+
+        // Wipe decrypted buffer from memory
+        Encryption::wipeString(decryptedOpt.value());
+        return dto;
+    }
+
+    // Legacy V1 record (only password was encrypted)
+    std::string aad = std::to_string(record.user_id);
     auto decryptedPassword = Encryption::decrypt(
         record.encrypted_password,
         record.nonce,
         vaultKey,
-        additionalData
+        aad
     );
 
     if (!decryptedPassword.has_value()) {
-        std::cerr << "[Vault Error] Decryption failed for credential ID: " << record.id << std::endl;
+        std::cerr << "[Vault Error] Legacy decryption failed for entry ID: " << record.id << std::endl;
         return std::nullopt;
     }
 
-    CredentialDTO dto;
-    dto.id = record.id;
-    dto.user_id = record.user_id;
     dto.website = record.website;
     dto.website_url = record.website_url;
     dto.username = record.username;
     dto.password = decryptedPassword.value();
-    dto.category = record.category;
+    dto.category = record.category.empty() ? "General" : record.category;
     dto.notes = record.notes;
-    dto.created_at = record.created_at;
-    dto.updated_at = record.updated_at;
-
-    // Check if category or notes marks this entry as a favorite (e.g. prefix tag)
-    // To support favorites without mutating schema, category can store "Favorite" or notes tag "[FAVORITE]"
-    dto.is_favorite = (record.notes.find("[FAVORITE]") != std::string::npos);
+    // Check if legacy note had [FAVORITE] tag
+    dto.is_favorite = record.is_favorite || (record.notes.find("[FAVORITE]") != std::string::npos);
 
     return dto;
 }
@@ -83,31 +149,36 @@ VaultResult Vault::addCredential(
         return result;
     }
 
-    // 1. Authenticated encryption with user_id as additional authenticated data
-    std::string additionalData = std::to_string(userId);
-    auto encrypted = Encryption::encrypt(input.password, vaultKey, additionalData);
+    // 1. Pack all sensitive fields into a single JSON payload
+    json payload = {
+        {"website", input.website},
+        {"website_url", input.website_url},
+        {"username", input.username},
+        {"password", input.password},
+        {"category", input.category.empty() ? "General" : input.category},
+        {"notes", input.notes}
+    };
+    std::string payloadStr = payload.dump();
+
+    // 2. Encrypt with XChaCha20-Poly1305 and bind to owner via AAD
+    std::string aad = Encryption::makeAAD(userId, 2);
+    auto encrypted = Encryption::encrypt(payloadStr, vaultKey, aad);
+    Encryption::wipeString(payloadStr);
+
     if (!encrypted.has_value()) {
-        result.message = "Cryptographic error: failed to encrypt password.";
+        result.message = "Cryptographic error: failed to encrypt credential payload.";
         return result;
     }
 
-    // 2. Prepare database record
+    // 3. Prepare database record
     VaultEntryRecord record;
     record.user_id = userId;
-    record.website = input.website;
-    record.website_url = input.website_url;
-    record.username = input.username;
-    record.encrypted_password = encrypted->ciphertext_hex;
-    record.nonce = encrypted->nonce_hex;
-    record.category = input.category.empty() ? "General" : input.category;
-    
-    // Store favorite indicator in notes if requested
-    record.notes = input.notes;
-    if (input.is_favorite && record.notes.find("[FAVORITE]") == std::string::npos) {
-        record.notes += " [FAVORITE]";
-    }
+    record.encrypted_data = encrypted->ciphertext_hex;
+    record.data_nonce = encrypted->nonce_hex;
+    record.encryption_version = 2;
+    record.is_favorite = input.is_favorite;
 
-    // 3. Persist into SQLite
+    // 4. Persist into SQLite
     int64_t newId = m_db->createVaultEntry(record);
     if (newId <= 0) {
         result.message = "Database error: failed to save credential.";
@@ -185,35 +256,46 @@ VaultResult Vault::updateCredential(
         return result;
     }
 
-    VaultEntryRecord updatedRecord = existingOpt.value();
-    updatedRecord.website = input.website;
-    updatedRecord.website_url = input.website_url;
-    updatedRecord.username = input.username;
-    updatedRecord.category = input.category.empty() ? "General" : input.category;
-
-    // Handle notes & favorite status
-    std::string cleanNotes = input.notes;
-    // Strip old [FAVORITE] tag if present
-    size_t tagPos = cleanNotes.find("[FAVORITE]");
-    if (tagPos != std::string::npos) {
-        cleanNotes.erase(tagPos, std::string("[FAVORITE]").length());
-    }
-    if (input.is_favorite) {
-        cleanNotes += " [FAVORITE]";
-    }
-    updatedRecord.notes = cleanNotes;
-
-    // If new password is provided, re-encrypt with fresh nonce
-    if (!input.password.empty()) {
-        std::string additionalData = std::to_string(userId);
-        auto encrypted = Encryption::encrypt(input.password, vaultKey, additionalData);
-        if (!encrypted.has_value()) {
-            result.message = "Cryptographic error: failed to encrypt updated password.";
+    // If password was left blank in the edit form, retain existing decrypted password
+    std::string passwordToSave = input.password;
+    if (passwordToSave.empty()) {
+        auto decryptedExisting = decryptRecord(existingOpt.value(), vaultKey);
+        if (decryptedExisting.has_value()) {
+            passwordToSave = decryptedExisting->password;
+        } else {
+            result.message = "Cannot update without password: failed to decrypt current password.";
             return result;
         }
-        updatedRecord.encrypted_password = encrypted->ciphertext_hex;
-        updatedRecord.nonce = encrypted->nonce_hex;
     }
+
+    // Pack all sensitive fields into encrypted payload
+    json payload = {
+        {"website", input.website},
+        {"website_url", input.website_url},
+        {"username", input.username},
+        {"password", passwordToSave},
+        {"category", input.category.empty() ? "General" : input.category},
+        {"notes", input.notes}
+    };
+    std::string payloadStr = payload.dump();
+
+    // Encrypt with fresh random nonce and AAD binding
+    std::string aad = Encryption::makeAAD(userId, 2);
+    auto encrypted = Encryption::encrypt(payloadStr, vaultKey, aad);
+    Encryption::wipeString(payloadStr);
+
+    if (!encrypted.has_value()) {
+        result.message = "Cryptographic error: failed to encrypt updated credential.";
+        return result;
+    }
+
+    VaultEntryRecord updatedRecord;
+    updatedRecord.id = credentialId;
+    updatedRecord.user_id = userId;
+    updatedRecord.encrypted_data = encrypted->ciphertext_hex;
+    updatedRecord.data_nonce = encrypted->nonce_hex;
+    updatedRecord.encryption_version = 2;
+    updatedRecord.is_favorite = input.is_favorite;
 
     bool ok = m_db->updateVaultEntry(updatedRecord);
     if (!ok) {
@@ -308,30 +390,10 @@ VaultResult Vault::setFavorite(int64_t credentialId, int64_t userId, bool isFavo
         return result;
     }
 
-    auto existingOpt = m_db->getVaultEntryById(credentialId, userId);
-    if (!existingOpt.has_value()) {
-        result.message = "Credential not found or permission denied.";
-        return result;
-    }
-
-    VaultEntryRecord record = existingOpt.value();
-    std::string notes = record.notes;
-
-    size_t tagPos = notes.find("[FAVORITE]");
-    if (isFavorite) {
-        if (tagPos == std::string::npos) {
-            notes += " [FAVORITE]";
-        }
-    } else {
-        if (tagPos != std::string::npos) {
-            notes.erase(tagPos, std::string("[FAVORITE]").length());
-        }
-    }
-    record.notes = notes;
-
-    bool ok = m_db->updateVaultEntry(record);
+    // Update the separate is_favorite column in SQLite
+    bool ok = m_db->setVaultEntryFavorite(credentialId, userId, isFavorite);
     if (!ok) {
-        result.message = "Failed to update favorite status.";
+        result.message = "Credential not found or permission denied.";
         return result;
     }
 
@@ -340,4 +402,3 @@ VaultResult Vault::setFavorite(int64_t credentialId, int64_t userId, bool isFavo
     result.credential_id = credentialId;
     return result;
 }
-

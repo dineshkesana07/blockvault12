@@ -29,6 +29,7 @@ struct AuthResult {
     int64_t user_id{0};     // Populated on successful login/registration
     std::string name;       // User's name
     std::string email;      // User's email
+    std::string vault_salt; // Stored per-user random salt (internal C++ only, never returned to frontend)
 };
 
 /**
@@ -50,29 +51,21 @@ public:
     Auth& operator=(const Auth&) = delete;
 
     /**
-     * @brief Registers a new user.
-     * - Validates email and master password strength.
-     * - Checks for duplicate email.
-     * - Hashes the master password using libsodium's Argon2id algorithm (crypto_pwhash_str).
-     * - Inserts user record into SQLite.
-     * - Generates a secure session token and logs the user in.
+     * @brief Registers a new user with a unique random vault salt and Argon2id password hash.
      *
      * @param name User's full or display name.
      * @param email User's email address.
-     * @param masterPassword Plain-text master password (wiped from memory after hashing).
-     * @return AuthResult with status and session token if successful.
+     * @param masterPassword Plain-text master password.
+     * @return AuthResult with status, session token, and vault salt if successful.
      */
     AuthResult registerUser(const std::string& name, const std::string& email, const std::string& masterPassword);
 
     /**
-     * @brief Authenticates an existing user with email and master password.
-     * - Retrieves user by email from SQLite.
-     * - Verifies master password against stored Argon2id hash using constant-time verification.
-     * - Generates and returns a secure random 256-bit session token.
+     * @brief Authenticates an existing user and returns their stored vault salt for key derivation.
      *
      * @param email User's email address.
      * @param masterPassword Master password entered by user.
-     * @return AuthResult with status and session token if successful.
+     * @return AuthResult with status, session token, and stored vault salt if successful.
      */
     AuthResult loginUser(const std::string& email, const std::string& masterPassword);
 
@@ -146,4 +139,3 @@ private:
 };
 
 #endif // AUTH_H
-

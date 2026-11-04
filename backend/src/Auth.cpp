@@ -1,10 +1,12 @@
 #include "Auth.h"
+#include "Encryption.h"
 #include <sodium.h>
 #include <regex>
 #include <random>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
+#include <cctype>
 
 namespace {
     // Ensures sodium_init() is called safely once across the program
@@ -22,6 +24,9 @@ Auth::Auth(std::shared_ptr<Database> db, int sessionDurationHours)
     : m_db(std::move(db)), m_sessionDurationHours(sessionDurationHours) {}
 
 bool Auth::isValidEmail(const std::string& email) {
+    if (email.empty() || email.length() > 254) {
+        return false;
+    }
     // RFC 5322 compatible regex for email format validation
     static const std::regex emailPattern(
         R"(^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$)"
@@ -32,6 +37,10 @@ bool Auth::isValidEmail(const std::string& email) {
 bool Auth::isValidPassword(const std::string& password, std::string& outReason) {
     if (password.length() < 8) {
         outReason = "Password must be at least 8 characters long.";
+        return false;
+    }
+    if (password.length() > 1024) {
+        outReason = "Password is too long (maximum 1024 characters).";
         return false;
     }
 
@@ -98,7 +107,7 @@ std::string Auth::hashPassword(const std::string& password) {
     );
 
     if (res != 0) {
-        std::cerr << "[Auth Error] libsodium password hashing failed (out of memory?)" << std::endl;
+        std::cerr << "[Auth Error] libsodium password hashing failed." << std::endl;
         return "";
     }
 
@@ -139,8 +148,8 @@ AuthResult Auth::registerUser(const std::string& name, const std::string& email,
     AuthResult res;
 
     // 1. Validate name
-    if (name.empty()) {
-        res.message = "Name cannot be empty.";
+    if (name.empty() || name.length() > 100) {
+        res.message = "Name must be between 1 and 100 characters.";
         return res;
     }
 
@@ -169,21 +178,28 @@ AuthResult Auth::registerUser(const std::string& name, const std::string& email,
         return res;
     }
 
-    // 5. Hash master password using libsodium Argon2id
+    // 5. Generate a cryptographically secure random 16-byte salt for this user
+    std::string vaultSalt = Encryption::generateSaltHex();
+    if (vaultSalt.empty()) {
+        res.message = "Cryptographic error while generating vault salt.";
+        return res;
+    }
+
+    // 6. Hash master password using libsodium Argon2id
     std::string passwordHash = hashPassword(masterPassword);
     if (passwordHash.empty()) {
         res.message = "Internal cryptographic error while securing master password.";
         return res;
     }
 
-    // 6. Persist user into database
-    int64_t newUserId = m_db->createUser(name, email, passwordHash);
+    // 7. Persist user into database with their unique vault_salt
+    int64_t newUserId = m_db->createUser(name, email, passwordHash, vaultSalt);
     if (newUserId <= 0) {
         res.message = "Failed to create user account in database.";
         return res;
     }
 
-    // 7. Generate session token for immediate login
+    // 8. Generate session token for immediate login
     std::string token = generateSecureToken();
 
     {
@@ -205,6 +221,7 @@ AuthResult Auth::registerUser(const std::string& name, const std::string& email,
     res.user_id = newUserId;
     res.name = name;
     res.email = email;
+    res.vault_salt = vaultSalt;
 
     return res;
 }
@@ -213,12 +230,12 @@ AuthResult Auth::loginUser(const std::string& email, const std::string& masterPa
     AuthResult res;
 
     if (!isValidEmail(email)) {
-        res.message = "Invalid email format.";
+        res.message = "Invalid email or master password.";
         return res;
     }
 
     if (masterPassword.empty()) {
-        res.message = "Master password cannot be empty.";
+        res.message = "Invalid email or master password.";
         return res;
     }
 
@@ -230,7 +247,7 @@ AuthResult Auth::loginUser(const std::string& email, const std::string& masterPa
     // 1. Retrieve user by email
     auto userOpt = m_db->getUserByEmail(email);
     if (!userOpt.has_value()) {
-        // Use generic error message to prevent user enumeration attacks
+        // Generic error message to prevent user enumeration attacks
         res.message = "Invalid email or master password.";
         return res;
     }
@@ -244,7 +261,17 @@ AuthResult Auth::loginUser(const std::string& email, const std::string& masterPa
         return res;
     }
 
-    // 3. Create active session token
+    // 3. Ensure user has a valid vault_salt; if empty (legacy record), fallback to email salt
+    std::string salt = user.vault_salt;
+    if (salt.empty()) {
+        salt = Encryption::toHex(
+            reinterpret_cast<const unsigned char*>(user.email.data()),
+            std::min<size_t>(user.email.size(), 16)
+        );
+        while (salt.length() < 32) salt += "0";
+    }
+
+    // 4. Create active session token
     std::string token = generateSecureToken();
 
     {
@@ -266,6 +293,7 @@ AuthResult Auth::loginUser(const std::string& email, const std::string& masterPa
     res.user_id = user.id;
     res.name = user.name;
     res.email = user.email;
+    res.vault_salt = salt;
 
     return res;
 }
@@ -299,4 +327,3 @@ std::optional<SessionInfo> Auth::validateToken(const std::string& token) {
 
     return it->second;
 }
-

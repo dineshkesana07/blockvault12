@@ -16,6 +16,12 @@ int main() {
   std::cout << "   BLOCKVAULT C++ Backend Server Starting" << std::endl;
   std::cout << "========================================" << std::endl;
 
+  // 0. Ensure cryptographic subsystem initializes safely (Fail-Closed)
+  if (!Encryption::isInitialized()) {
+    std::cerr << "[Fatal] libsodium failed to initialize. Aborting startup." << std::endl;
+    return 1;
+  }
+
   // 1. Read DB_PATH from environment (default: database/blockvault.db)
   std::string dbPath = "database/blockvault.db";
   const char *envDbPath = std::getenv("DB_PATH");
@@ -32,7 +38,7 @@ int main() {
   // 2. Initialize Database
   auto db = std::make_shared<Database>(dbPath);
   if (!db->init()) {
-    std::cerr << "[Fatal] Failed to initialize SQLite database." << std::endl;
+    std::cerr << "[Fatal] Failed to initialize SQLite database at: " << dbPath << std::endl;
     return 1;
   }
   std::cout << "[DB] Connected to SQLite database at: " << dbPath << std::endl;
@@ -78,15 +84,11 @@ int main() {
           return crow::response(400, json({{"error", result.message}}).dump());
         }
 
-        // Derive vault key and store in session store for immediate use
-        std::string userSalt = Encryption::toHex(
-            reinterpret_cast<const unsigned char *>(email.data()),
-            std::min<size_t>(email.size(), 16));
-        while (userSalt.length() < 32)
-          userSalt += "0";
-
-        SecureKey vaultKey =
-            Encryption::deriveVaultKey(masterPassword, userSalt);
+        // Derive vault key from master password and per-user unique random vault salt
+        SecureKey vaultKey = Encryption::deriveVaultKey(masterPassword, result.vault_salt);
+        if (!vaultKey.isValid()) {
+          return crow::response(500, json({{"error", "Failed to derive vault encryption key."}}).dump());
+        }
         SessionKeyStore::instance().storeKey(result.token, std::move(vaultKey));
 
         json resp = {{"success", true},
@@ -118,15 +120,11 @@ int main() {
           return crow::response(401, json({{"error", result.message}}).dump());
         }
 
-        // Derive vault key and store in active session store
-        std::string userSalt = Encryption::toHex(
-            reinterpret_cast<const unsigned char *>(email.data()),
-            std::min<size_t>(email.size(), 16));
-        while (userSalt.length() < 32)
-          userSalt += "0";
-
-        SecureKey vaultKey =
-            Encryption::deriveVaultKey(masterPassword, userSalt);
+        // Derive vault key using the user's stored vault salt
+        SecureKey vaultKey = Encryption::deriveVaultKey(masterPassword, result.vault_salt);
+        if (!vaultKey.isValid()) {
+          return crow::response(500, json({{"error", "Failed to derive vault encryption key."}}).dump());
+        }
         SessionKeyStore::instance().storeKey(result.token, std::move(vaultKey));
 
         json resp = {{"success", true},
@@ -218,7 +216,7 @@ int main() {
         return crow::response(201, json({{"success", true},
                                          {"message", res.message},
                                          {"credential_id", res.credential_id}})
-                                       .dump());
+                                        .dump());
       });
 
   // GET /api/vault
@@ -330,13 +328,15 @@ int main() {
         VaultResult res = vault->updateCredential(
             credentialId, sessionOpt->user_id, input, *sessionOpt->vault_key);
         if (!res.success) {
-          return crow::response(400, json({{"error", res.message}}).dump());
+          int code = (res.message.find("not found") != std::string::npos ||
+                      res.message.find("permission denied") != std::string::npos) ? 404 : 400;
+          return crow::response(code, json({{"error", res.message}}).dump());
         }
 
         return crow::response(200, json({{"success", true},
                                          {"message", res.message},
                                          {"credential_id", credentialId}})
-                                       .dump());
+                                        .dump());
       });
 
   // DELETE /api/vault/<int>
@@ -381,7 +381,7 @@ int main() {
         VaultResult res =
             vault->setFavorite(credentialId, sessionOpt->user_id, isFav);
         if (!res.success) {
-          return crow::response(400, json({{"error", res.message}}).dump());
+          return crow::response(404, json({{"error", res.message}}).dump());
         }
 
         return crow::response(

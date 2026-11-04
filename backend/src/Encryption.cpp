@@ -3,16 +3,24 @@
 #include <cstring>
 #include <sstream>
 #include <iomanip>
+#include <cctype>
 
 namespace {
-    struct SodiumInitializer {
-        SodiumInitializer() {
-            if (sodium_init() < 0) {
+    struct SodiumState {
+        bool initialized{false};
+        SodiumState() {
+            if (sodium_init() >= 0) {
+                initialized = true;
+            } else {
                 std::cerr << "[Encryption Fatal] libsodium initialization failed!" << std::endl;
             }
         }
     };
-    static SodiumInitializer g_sodiumInit;
+    static SodiumState g_sodiumState;
+}
+
+bool Encryption::isInitialized() {
+    return g_sodiumState.initialized;
 }
 
 // ==========================================
@@ -25,8 +33,13 @@ SecureKey::SecureKey() {
 }
 
 SecureKey::SecureKey(const unsigned char key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES]) {
-    std::memcpy(m_key, key, crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
-    m_valid = true;
+    if (key != nullptr) {
+        std::memcpy(m_key, key, crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
+        m_valid = true;
+    } else {
+        sodium_memzero(m_key, sizeof(m_key));
+        m_valid = false;
+    }
 }
 
 SecureKey::~SecureKey() {
@@ -58,6 +71,9 @@ SecureKey& SecureKey::operator=(SecureKey&& other) noexcept {
 // ==========================================
 
 std::string Encryption::toHex(const unsigned char* data, size_t length) {
+    if (!data || length == 0) {
+        return "";
+    }
     std::ostringstream oss;
     for (size_t i = 0; i < length; ++i) {
         oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(data[i]);
@@ -67,11 +83,18 @@ std::string Encryption::toHex(const unsigned char* data, size_t length) {
 
 std::vector<unsigned char> Encryption::fromHex(const std::string& hexStr) {
     std::vector<unsigned char> bytes;
-    if (hexStr.length() % 2 != 0) {
+    if (hexStr.empty() || hexStr.length() % 2 != 0) {
         return bytes;
     }
-    bytes.reserve(hexStr.length() / 2);
 
+    // Strictly validate that all characters are hexadecimal
+    for (char c : hexStr) {
+        if (!std::isxdigit(static_cast<unsigned char>(c))) {
+            return bytes; // Return empty vector if any non-hex character is encountered
+        }
+    }
+
+    bytes.reserve(hexStr.length() / 2);
     for (size_t i = 0; i < hexStr.length(); i += 2) {
         std::string byteString = hexStr.substr(i, 2);
         char* endPtr = nullptr;
@@ -97,6 +120,10 @@ void Encryption::wipeString(std::string& str) {
 // ==========================================
 
 std::string Encryption::generateSaltHex() {
+    if (!isInitialized()) {
+        std::cerr << "[Encryption Error] libsodium is not initialized." << std::endl;
+        return "";
+    }
     unsigned char salt[crypto_pwhash_SALTBYTES]; // 16 bytes
     randombytes_buf(salt, sizeof(salt));
     std::string hexSalt = toHex(salt, sizeof(salt));
@@ -105,10 +132,17 @@ std::string Encryption::generateSaltHex() {
 }
 
 std::vector<unsigned char> Encryption::generateNonce() {
+    if (!isInitialized()) {
+        return {};
+    }
     // XChaCha20 uses a 192-bit (24-byte) nonce
     std::vector<unsigned char> nonce(crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
     randombytes_buf(nonce.data(), nonce.size());
     return nonce;
+}
+
+std::string Encryption::makeAAD(int64_t userId, int version) {
+    return "blockvault:v" + std::to_string(version) + ":uid=" + std::to_string(userId);
 }
 
 // ==========================================
@@ -116,9 +150,20 @@ std::vector<unsigned char> Encryption::generateNonce() {
 // ==========================================
 
 SecureKey Encryption::deriveVaultKey(const std::string& masterPassword, const std::string& saltHex) {
+    if (!isInitialized()) {
+        std::cerr << "[Encryption Error] libsodium is not initialized." << std::endl;
+        return SecureKey();
+    }
+
+    if (masterPassword.empty()) {
+        std::cerr << "[Encryption Error] Empty master password." << std::endl;
+        return SecureKey();
+    }
+
     std::vector<unsigned char> saltBytes = fromHex(saltHex);
     if (saltBytes.size() != crypto_pwhash_SALTBYTES) {
-        std::cerr << "[Encryption Error] Invalid salt size for key derivation." << std::endl;
+        std::cerr << "[Encryption Error] Invalid salt size: expected " 
+                  << crypto_pwhash_SALTBYTES << " bytes." << std::endl;
         return SecureKey();
     }
 
@@ -135,6 +180,9 @@ SecureKey Encryption::deriveVaultKey(const std::string& masterPassword, const st
         crypto_pwhash_MEMLIMIT_INTERACTIVE,
         crypto_pwhash_ALG_ARGON2ID13
     );
+
+    // Wipe sensitive salt buffer from stack
+    sodium_memzero(saltBytes.data(), saltBytes.size());
 
     if (res != 0) {
         std::cerr << "[Encryption Error] Key derivation failed." << std::endl;
@@ -157,6 +205,11 @@ std::optional<EncryptedPayload> Encryption::encrypt(
     const SecureKey& key,
     const std::string& additionalData
 ) {
+    if (!isInitialized()) {
+        std::cerr << "[Encryption Error] libsodium is not initialized." << std::endl;
+        return std::nullopt;
+    }
+
     if (!key.isValid()) {
         std::cerr << "[Encryption Error] Cannot encrypt with invalid key." << std::endl;
         return std::nullopt;
@@ -164,6 +217,10 @@ std::optional<EncryptedPayload> Encryption::encrypt(
 
     // 1. Generate unique 192-bit random nonce
     std::vector<unsigned char> nonce = generateNonce();
+    if (nonce.size() != crypto_aead_xchacha20poly1305_ietf_NPUBBYTES) {
+        std::cerr << "[Encryption Error] Failed to generate nonce." << std::endl;
+        return std::nullopt;
+    }
 
     // 2. Allocate buffer for ciphertext + Poly1305 MAC tag (16 bytes tag overhead)
     size_t ciphertextLen = plaintext.length() + crypto_aead_xchacha20poly1305_ietf_ABYTES;
@@ -185,6 +242,8 @@ std::optional<EncryptedPayload> Encryption::encrypt(
 
     if (res != 0) {
         std::cerr << "[Encryption Error] crypto_aead_xchacha20poly1305_ietf_encrypt failed." << std::endl;
+        sodium_memzero(ciphertext.data(), ciphertext.size());
+        sodium_memzero(nonce.data(), nonce.size());
         return std::nullopt;
     }
 
@@ -209,6 +268,11 @@ std::optional<std::string> Encryption::decrypt(
     const SecureKey& key,
     const std::string& additionalData
 ) {
+    if (!isInitialized()) {
+        std::cerr << "[Encryption Error] libsodium is not initialized." << std::endl;
+        return std::nullopt;
+    }
+
     if (!key.isValid()) {
         std::cerr << "[Encryption Error] Cannot decrypt with invalid key." << std::endl;
         return std::nullopt;
@@ -228,7 +292,7 @@ std::optional<std::string> Encryption::decrypt(
     }
 
     size_t decryptedMaxLen = ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_ABYTES;
-    std::vector<unsigned char> decrypted(decryptedMaxLen);
+    std::vector<unsigned char> decrypted(decryptedMaxLen == 0 ? 1 : decryptedMaxLen);
     unsigned long long actualDecryptedLen = 0;
 
     // Decrypt and verify Poly1305 authentication tag
@@ -245,8 +309,7 @@ std::optional<std::string> Encryption::decrypt(
     );
 
     if (res != 0) {
-        // Authentication failed: MAC tag mismatch, data corrupted, or wrong key used
-        std::cerr << "[Encryption Error] Authentication failed: invalid key or corrupted ciphertext." << std::endl;
+        // Authentication failed: MAC tag mismatch, data corrupted, or wrong key/AAD used
         sodium_memzero(decrypted.data(), decrypted.size());
         return std::nullopt;
     }
@@ -257,4 +320,3 @@ std::optional<std::string> Encryption::decrypt(
 
     return plaintext;
 }
-

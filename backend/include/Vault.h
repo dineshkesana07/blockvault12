@@ -65,8 +65,8 @@ public:
     Vault& operator=(const Vault&) = delete;
 
     /**
-     * @brief Adds a new website credential to the user's vault.
-     * Encrypts the password with XChaCha20-Poly1305 before persisting to SQLite.
+     * @brief Adds a new credential to the user's vault.
+     * Encrypts all sensitive fields into a single authenticated payload with XChaCha20-Poly1305.
      *
      * @param userId Authenticated user's ID.
      * @param input Credential data to save.
@@ -108,7 +108,7 @@ public:
 
     /**
      * @brief Updates an existing credential.
-     * If a new password is provided, it is re-encrypted with a freshly generated nonce.
+     * Re-encrypts all sensitive fields with a fresh random nonce.
      *
      * @param credentialId ID of the credential to update.
      * @param userId Authenticated user's ID.
@@ -134,7 +134,8 @@ public:
     VaultResult deleteCredential(int64_t credentialId, int64_t userId);
 
     /**
-     * @brief Searches credentials matching a query substring in the website name.
+     * @brief Searches credentials matching a query substring in the website name or username.
+     * Performs in-memory filtering over securely decrypted records.
      *
      * @param userId Authenticated user's ID.
      * @param query Search query string.
@@ -148,7 +149,7 @@ public:
     );
 
     /**
-     * @brief Filters credentials by category (e.g., 'Work', 'Finance', 'Entertainment').
+     * @brief Filters credentials by category.
      *
      * @param userId Authenticated user's ID.
      * @param category Category name to filter by.
@@ -163,6 +164,7 @@ public:
 
     /**
      * @brief Toggles or sets the favorite status of a credential.
+     * Updates the dedicated is_favorite database column.
      *
      * @param credentialId ID of the credential.
      * @param userId Authenticated user's ID.
@@ -189,4 +191,3 @@ private:
 };
 
 #endif // VAULT_H
-

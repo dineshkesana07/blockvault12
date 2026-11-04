@@ -9235,13 +9235,16 @@ namespace crow
 
         void handle_url()
         {
+            if (req_.method == HTTPMethod::Options)
+            {
+                return;
+            }
+
             routing_handle_result_ = handler_->handle_initial(req_, res);
-            // if no route is found for the request method, return the response without parsing or processing anything further.
             if (!routing_handle_result_->rule_index)
             {
-                parser_.done();
-                need_to_call_after_handlers_ = true;
-                complete_request();
+                // Allow global middleware to add headers before this error is sent.
+                return;
             }
         }
 
@@ -14313,4 +14316,3 @@ namespace crow
     /// an Crow application that doesn't require of Middlewares
     using SimpleApp = Crow<>;
 } // namespace crow
-

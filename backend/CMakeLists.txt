@@ -7,19 +7,16 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Remove SQLite fetch and library
-# FetchContent_Declare(
-#     sqlite3
-#     URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
-#     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-# )
-# FetchContent_MakeAvailable(sqlite3)
-# add_library(sqlite3_lib STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
-# target_include_directories(sqlite3_lib PUBLIC ${sqlite3_SOURCE_DIR})
+# 1. SQLite3
+FetchContent_Declare(
+    sqlite3
+    URL https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(sqlite3)
 
-# Add PostgreSQL client
-find_package(PostgreSQL REQUIRED)
-
+add_library(sqlite3_lib STATIC ${sqlite3_SOURCE_DIR}/sqlite3.c)
+target_include_directories(sqlite3_lib PUBLIC ${sqlite3_SOURCE_DIR})
 
 # 2. nlohmann/json
 FetchContent_Declare(
@@ -71,9 +68,9 @@ add_executable(blockvault_server
 target_include_directories(blockvault_server PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${ASIO_INCLUDE_DIR}
+    ${sqlite3_SOURCE_DIR}
     ${SODIUM_INCLUDE_DIRS}
     ${json_SOURCE_DIR}/include
-    ${PostgreSQL_INCLUDE_DIRS}
 )
 
 if(WIN32)
@@ -84,10 +81,10 @@ if(WIN32)
     )
 
     target_link_libraries(blockvault_server PRIVATE
+        sqlite3_lib
         ${SODIUM_TARGET}
         ws2_32
         mswsock
-        ${PostgreSQL_LIBRARIES}
     )
 else()
     target_compile_definitions(blockvault_server PRIVATE
@@ -96,7 +93,7 @@ else()
     )
 
     target_link_libraries(blockvault_server PRIVATE
-        ${PostgreSQL_LIBRARIES}
+        sqlite3_lib
         ${SODIUM_TARGET}
         pthread
         dl

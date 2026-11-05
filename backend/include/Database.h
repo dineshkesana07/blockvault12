@@ -4,9 +4,9 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
-#include <sqlite3.h>
 #include <string>
 #include <vector>
+#include <libpq-fe.h>
 
 struct UserRecord {
   int64_t id{0};
@@ -43,8 +43,8 @@ struct VaultEntryRecord {
 };
 
 class Database {
-public:
-  explicit Database(const std::string &dbPath);
+ public:
+  explicit Database(const std::string &conninfo);
   ~Database();
 
   Database(const Database &) = delete;
@@ -85,15 +85,15 @@ public:
 
   std::string getLastError() const;
 
-private:
-  std::string m_dbPath;
-  sqlite3 *m_db{nullptr};
+ private:
+  std::string m_conninfo;
+  PGconn *m_conn{nullptr};
   mutable std::mutex m_mutex;
 
   void closeInternal();
+  bool executeSQL(const std::string &sql);
   bool createTables();
   bool migrateTables();
-  bool executeRawLocked(const std::string &sql);
 };
 
 #endif // DATABASE_H

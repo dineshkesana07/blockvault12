@@ -1,54 +1,61 @@
 #include "Database.h"
 #include <iostream>
-#include <memory>
-#include <set>
+#include <sstream>
+#include <cstring>
 
-namespace {
-    // Helper RAII wrapper for sqlite3_stmt to guarantee sqlite3_finalize is always called
-    struct StmtCloser {
-        void operator()(sqlite3_stmt* stmt) const {
-            if (stmt) {
-                sqlite3_finalize(stmt);
-            }
-        }
-    };
-    using UniqueStmt = std::unique_ptr<sqlite3_stmt, StmtCloser>;
+// Helper to log errors
+static void logError(const std::string &msg) {
+    std::cerr << "[Database Error] " << msg << std::endl;
 }
 
-Database::Database(const std::string& dbPath)
-    : m_dbPath(dbPath) {}
+Database::Database(const std::string &conninfo)
+    : m_conninfo(conninfo), m_conn(nullptr) {}
 
 Database::~Database() {
     close();
 }
 
-Database::Database(Database&& other) noexcept {
+// Move constructor
+Database::Database(Database &&other) noexcept {
     std::lock_guard<std::mutex> lock(other.m_mutex);
-    m_dbPath = std::move(other.m_dbPath);
-    m_db = other.m_db;
-    other.m_db = nullptr;
+    m_conninfo = std::move(other.m_conninfo);
+    m_conn = other.m_conn;
+    other.m_conn = nullptr;
 }
 
-Database& Database::operator=(Database&& other) noexcept {
+// Move assignment
+Database &Database::operator=(Database &&other) noexcept {
     if (this != &other) {
-        // Lock both mutexes in a dead-lock-free order
         std::unique_lock<std::mutex> lockThis(m_mutex, std::defer_lock);
         std::unique_lock<std::mutex> lockOther(other.m_mutex, std::defer_lock);
         std::lock(lockThis, lockOther);
-
         closeInternal();
-        m_dbPath = std::move(other.m_dbPath);
-        m_db = other.m_db;
-        other.m_db = nullptr;
+        m_conninfo = std::move(other.m_conninfo);
+        m_conn = other.m_conn;
+        other.m_conn = nullptr;
     }
     return *this;
 }
 
-void Database::closeInternal() {
-    if (m_db) {
-        sqlite3_close_v2(m_db);
-        m_db = nullptr;
+bool Database::init() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_conn = PQconnectdb(m_conninfo.c_str());
+    if (PQstatus(m_conn) != CONNECTION_OK) {
+        logError(std::string("Failed to connect to PostgreSQL: ") + PQerrorMessage(m_conn));
+        closeInternal();
+        return false;
     }
+    // Create schema if absent
+    if (!createTables()) {
+        closeInternal();
+        return false;
+    }
+    // Run migrations (currently a no‑op placeholder)
+    if (!migrateTables()) {
+        closeInternal();
+        return false;
+    }
+    return true;
 }
 
 void Database::close() {
@@ -58,103 +65,369 @@ void Database::close() {
 
 bool Database::isOpen() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    return m_db != nullptr;
+    return m_conn && PQstatus(m_conn) == CONNECTION_OK;
 }
 
 std::string Database::getLastError() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_db) {
-        return sqlite3_errmsg(m_db);
+    if (m_conn) {
+        return PQerrorMessage(m_conn);
     }
-    return "Database handle is null";
+    return "No connection";
 }
 
-bool Database::executeRawLocked(const std::string& sql) {
-    if (!m_db) return false;
-    char* errMsg = nullptr;
-    int rc = sqlite3_exec(m_db, sql.c_str(), nullptr, nullptr, &errMsg);
-    if (rc != SQLITE_OK) {
-        std::cerr << "[Database Error] executeRaw failed: " 
-                  << (errMsg ? errMsg : "Unknown error") 
-                  << " (SQL: " << sql << ")" << std::endl;
-        if (errMsg) sqlite3_free(errMsg);
+void Database::closeInternal() {
+    if (m_conn) {
+        PQfinish(m_conn);
+        m_conn = nullptr;
+    }
+}
+
+bool Database::executeSQL(const std::string &sql) {
+    // Used for statements that do not return rows (CREATE, UPDATE, etc.)
+    PGresult *res = PQexec(m_conn, sql.c_str());
+    if (!res) {
+        logError(std::string("PQexec failed: ") + PQerrorMessage(m_conn));
         return false;
     }
-    return true;
+    ExecStatusType status = PQresultStatus(res);
+    bool ok = (status == PGRES_COMMAND_OK);
+    if (!ok) {
+        logError(std::string("SQL execution failed (" ) + PQerrorMessage(m_conn) + "): " + sql);
+    }
+    PQclear(res);
+    return ok;
 }
 
-bool Database::init() {
+bool Database::beginTransaction() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    return executeSQL("BEGIN");
+}
 
-    // 1. Open SQLite database with read/write and create capabilities
-    int rc = sqlite3_open_v2(
-        m_dbPath.c_str(),
-        &m_db,
-        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
-        nullptr
-    );
+bool Database::commitTransaction() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return executeSQL("COMMIT");
+}
 
-    if (rc != SQLITE_OK) {
-        std::cerr << "[Database Error] Failed to open database at " 
-                  << m_dbPath << ": " << (m_db ? sqlite3_errmsg(m_db) : "Unknown error") << std::endl;
-        closeInternal(); // Safe: does not re-acquire m_mutex
+bool Database::rollbackTransaction() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return executeSQL("ROLLBACK");
+}
+
+int64_t Database::createUser(const std::string &name,
+                             const std::string &email,
+                             const std::string &passwordHash,
+                             const std::string &vaultSalt) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt = "INSERT INTO users (name, email, password_hash, vault_salt) "
+                       "VALUES ($1, $2, $3, $4) RETURNING id;";
+    const char *params[4] = {name.c_str(), email.c_str(), passwordHash.c_str(), vaultSalt.c_str()};
+    int lengths[4] = {static_cast<int>(name.size()), static_cast<int>(email.size()),
+                      static_cast<int>(passwordHash.size()), static_cast<int>(vaultSalt.size())};
+    int formats[4] = {0, 0, 0, 0}; // text
+    PGresult *res = PQexecParams(m_conn, stmt, 4, nullptr, params, lengths, formats, 0);
+    if (!res) {
+        logError(std::string("createUser PQexecParams failed: ") + PQerrorMessage(m_conn));
+        return 0;
+    }
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        logError(std::string("createUser failed: ") + PQerrorMessage(m_conn));
+        PQclear(res);
+        return 0;
+    }
+    char *idStr = PQgetvalue(res, 0, 0);
+    int64_t id = std::stoll(idStr);
+    PQclear(res);
+    return id;
+}
+
+std::optional<UserRecord> Database::getUserByEmail(const std::string &email) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt = "SELECT id, name, email, password_hash, vault_salt, created_at FROM users WHERE email = $1;";
+    const char *param = email.c_str();
+    int len = static_cast<int>(email.size());
+    int format = 0;
+    PGresult *res = PQexecParams(m_conn, stmt, 1, nullptr, &param, &len, &format, 0);
+    if (!res) {
+        logError(std::string("getUserByEmail PQexecParams failed: ") + PQerrorMessage(m_conn));
+        return {};
+    }
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        logError(std::string("getUserByEmail failed: ") + PQerrorMessage(m_conn));
+        PQclear(res);
+        return {};
+    }
+    if (PQntuples(res) == 0) {
+        PQclear(res);
+        return {};
+    }
+    UserRecord user;
+    user.id = std::stoll(PQgetvalue(res, 0, 0));
+    user.name = PQgetvalue(res, 0, 1);
+    user.email = PQgetvalue(res, 0, 2);
+    user.password_hash = PQgetvalue(res, 0, 3);
+    user.vault_salt = PQgetvalue(res, 0, 4);
+    user.created_at = PQgetvalue(res, 0, 5);
+    PQclear(res);
+    return user;
+}
+
+std::optional<UserRecord> Database::getUserById(int64_t id) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt = "SELECT id, name, email, password_hash, vault_salt, created_at FROM users WHERE id = $1;";
+    std::string idStr = std::to_string(id);
+    const char *param = idStr.c_str();
+    int len = static_cast<int>(idStr.size());
+    int format = 0;
+    PGresult *res = PQexecParams(m_conn, stmt, 1, nullptr, &param, &len, &format, 0);
+    if (!res) {
+        logError(std::string("getUserById PQexecParams failed: ") + PQerrorMessage(m_conn));
+        return {};
+    }
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        logError(std::string("getUserById failed: ") + PQerrorMessage(m_conn));
+        PQclear(res);
+        return {};
+    }
+    if (PQntuples(res) == 0) {
+        PQclear(res);
+        return {};
+    }
+    UserRecord user;
+    user.id = std::stoll(PQgetvalue(res, 0, 0));
+    user.name = PQgetvalue(res, 0, 1);
+    user.email = PQgetvalue(res, 0, 2);
+    user.password_hash = PQgetvalue(res, 0, 3);
+    user.vault_salt = PQgetvalue(res, 0, 4);
+    user.created_at = PQgetvalue(res, 0, 5);
+    PQclear(res);
+    return user;
+}
+
+int64_t Database::createVaultEntry(const VaultEntryRecord &entry) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt =
+        "INSERT INTO vault_entries (user_id, encrypted_data, data_nonce, encryption_version, is_favorite, "
+        "website, website_url, username, encrypted_password, nonce, category, notes) "
+        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id;";
+    // Prepare string parameters that must outlive the call
+    std::string s_user_id = std::to_string(entry.user_id);
+    std::string s_enc_version = std::to_string(entry.encryption_version);
+    const char *params[12] = {
+        s_user_id.c_str(),
+        entry.encrypted_data.c_str(),
+        entry.data_nonce.c_str(),
+        s_enc_version.c_str(),
+        entry.is_favorite ? "true" : "false",
+        entry.website.c_str(),
+        entry.website_url.c_str(),
+        entry.username.c_str(),
+        entry.encrypted_password.c_str(),
+        entry.nonce.c_str(),
+        entry.category.c_str(),
+        entry.notes.c_str()
+    };
+    // Let libpq compute lengths by passing nullptr.
+    PGresult *res = PQexecParams(m_conn, stmt, 12, nullptr, params, nullptr, nullptr, 0);
+    if (!res) {
+        logError(std::string("createVaultEntry PQexecParams failed: ") + PQerrorMessage(m_conn));
+        return 0;
+    }
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        logError(std::string("createVaultEntry failed: ") + PQerrorMessage(m_conn));
+        PQclear(res);
+        return 0;
+    }
+    int64_t id = std::stoll(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    return id;
+}
+
+std::vector<VaultEntryRecord> Database::getVaultEntriesByUserId(int64_t userId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt = "SELECT id, user_id, encrypted_data, data_nonce, encryption_version, is_favorite, "
+                        "website, website_url, username, encrypted_password, nonce, category, notes, created_at, updated_at "
+                        "FROM vault_entries WHERE user_id = $1;";
+    std::string idStr = std::to_string(userId);
+    const char *param = idStr.c_str();
+    int len = static_cast<int>(idStr.size());
+    int format = 0;
+    PGresult *res = PQexecParams(m_conn, stmt, 1, nullptr, &param, &len, &format, 0);
+    std::vector<VaultEntryRecord> result;
+    if (!res) {
+        logError(std::string("getVaultEntriesByUserId PQexecParams failed: ") + PQerrorMessage(m_conn));
+        return result;
+    }
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        logError(std::string("getVaultEntriesByUserId failed: ") + PQerrorMessage(m_conn));
+        PQclear(res);
+        return result;
+    }
+    int rows = PQntuples(res);
+    for (int i = 0; i < rows; ++i) {
+        VaultEntryRecord rec;
+        rec.id = std::stoll(PQgetvalue(res, i, 0));
+        rec.user_id = std::stoll(PQgetvalue(res, i, 1));
+        rec.encrypted_data = PQgetvalue(res, i, 2);
+        rec.data_nonce = PQgetvalue(res, i, 3);
+        rec.encryption_version = std::stoi(PQgetvalue(res, i, 4));
+        rec.is_favorite = (std::string(PQgetvalue(res, i, 5)) == "t" || std::string(PQgetvalue(res, i, 5)) == "true");
+        rec.website = PQgetvalue(res, i, 6);
+        rec.website_url = PQgetvalue(res, i, 7);
+        rec.username = PQgetvalue(res, i, 8);
+        rec.encrypted_password = PQgetvalue(res, i, 9);
+        rec.nonce = PQgetvalue(res, i, 10);
+        rec.category = PQgetvalue(res, i, 11);
+        rec.notes = PQgetvalue(res, i, 12);
+        rec.created_at = PQgetvalue(res, i, 13);
+        rec.updated_at = PQgetvalue(res, i, 14);
+        result.push_back(std::move(rec));
+    }
+    PQclear(res);
+    return result;
+}
+
+std::optional<VaultEntryRecord> Database::getVaultEntryById(int64_t entryId, int64_t userId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt = "SELECT id, user_id, encrypted_data, data_nonce, encryption_version, is_favorite, "
+                        "website, website_url, username, encrypted_password, nonce, category, notes, created_at, updated_at "
+                        "FROM vault_entries WHERE id = $1 AND user_id = $2;";
+    std::string idStr = std::to_string(entryId);
+    std::string uidStr = std::to_string(userId);
+    const char *params[2] = {idStr.c_str(), uidStr.c_str()};
+    int lengths[2] = {static_cast<int>(idStr.size()), static_cast<int>(uidStr.size())};
+    int formats[2] = {0, 0};
+    PGresult *res = PQexecParams(m_conn, stmt, 2, nullptr, params, lengths, formats, 0);
+    if (!res) {
+        logError(std::string("getVaultEntryById PQexecParams failed: ") + PQerrorMessage(m_conn));
+        return {};
+    }
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        logError(std::string("getVaultEntryById failed: ") + PQerrorMessage(m_conn));
+        PQclear(res);
+        return {};
+    }
+    if (PQntuples(res) == 0) {
+        PQclear(res);
+        return {};
+    }
+    VaultEntryRecord rec;
+    rec.id = std::stoll(PQgetvalue(res, 0, 0));
+    rec.user_id = std::stoll(PQgetvalue(res, 0, 1));
+    rec.encrypted_data = PQgetvalue(res, 0, 2);
+    rec.data_nonce = PQgetvalue(res, 0, 3);
+    rec.encryption_version = std::stoi(PQgetvalue(res, 0, 4));
+    rec.is_favorite = (std::string(PQgetvalue(res, 0, 5)) == "t" || std::string(PQgetvalue(res, 0, 5)) == "true");
+    rec.website = PQgetvalue(res, 0, 6);
+    rec.website_url = PQgetvalue(res, 0, 7);
+    rec.username = PQgetvalue(res, 0, 8);
+    rec.encrypted_password = PQgetvalue(res, 0, 9);
+    rec.nonce = PQgetvalue(res, 0, 10);
+    rec.category = PQgetvalue(res, 0, 11);
+    rec.notes = PQgetvalue(res, 0, 12);
+    rec.created_at = PQgetvalue(res, 0, 13);
+    rec.updated_at = PQgetvalue(res, 0, 14);
+    PQclear(res);
+    return rec;
+}
+
+bool Database::updateVaultEntry(const VaultEntryRecord &entry) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt =
+        "UPDATE vault_entries SET encrypted_data=$1, data_nonce=$2, encryption_version=$3, is_favorite=$4, "
+        "website=$5, website_url=$6, username=$7, encrypted_password=$8, nonce=$9, category=$10, notes=$11, updated_at=CURRENT_TIMESTAMP "
+        "WHERE id=$12 AND user_id=$13;";
+    const char *params[13] = {
+        entry.encrypted_data.c_str(),
+        entry.data_nonce.c_str(),
+        std::to_string(entry.encryption_version).c_str(),
+        entry.is_favorite ? "true" : "false",
+        entry.website.c_str(),
+        entry.website_url.c_str(),
+        entry.username.c_str(),
+        entry.encrypted_password.c_str(),
+        entry.nonce.c_str(),
+        entry.category.c_str(),
+        entry.notes.c_str(),
+        std::to_string(entry.id).c_str(),
+        std::to_string(entry.user_id).c_str()
+    };
+    int lengths[13];
+    for (int i = 0; i < 13; ++i) lengths[i] = static_cast<int>(std::strlen(params[i]));
+    int formats[13] = {0};
+    PGresult *res = PQexecParams(m_conn, stmt, 13, nullptr, params, lengths, formats, 0);
+    if (!res) {
+        logError(std::string("updateVaultEntry PQexecParams failed: ") + PQerrorMessage(m_conn));
         return false;
     }
+    bool ok = (PQresultStatus(res) == PGRES_COMMAND_OK);
+    if (!ok) {
+        logError(std::string("updateVaultEntry failed: ") + PQerrorMessage(m_conn));
+    }
+    PQclear(res);
+    return ok;
+}
 
-    // 2. Enable Foreign Key Constraints (SQLite disables them by default)
-    if (!executeRawLocked("PRAGMA foreign_keys = ON;")) {
-        std::cerr << "[Database Error] Failed to enable foreign keys." << std::endl;
-        closeInternal();
+bool Database::setVaultEntryFavorite(int64_t entryId, int64_t userId, bool isFavorite) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt = "UPDATE vault_entries SET is_favorite=$1 WHERE id=$2 AND user_id=$3;";
+    const char *params[3] = {isFavorite ? "true" : "false", std::to_string(entryId).c_str(), std::to_string(userId).c_str()};
+    int lengths[3] = {static_cast<int>(std::strlen(params[0])), static_cast<int>(std::strlen(params[1])), static_cast<int>(std::strlen(params[2]))};
+    int formats[3] = {0,0,0};
+    PGresult *res = PQexecParams(m_conn, stmt, 3, nullptr, params, lengths, formats, 0);
+    if (!res) {
+        logError(std::string("setVaultEntryFavorite PQexecParams failed: ") + PQerrorMessage(m_conn));
         return false;
     }
+    bool ok = (PQresultStatus(res) == PGRES_COMMAND_OK);
+    if (!ok) {
+        logError(std::string("setVaultEntryFavorite failed: ") + PQerrorMessage(m_conn));
+    }
+    PQclear(res);
+    return ok;
+}
 
-    // 3. Set Write-Ahead Logging (WAL) mode for better concurrent performance
-    executeRawLocked("PRAGMA journal_mode = WAL;");
-
-    // 4. Create required database tables
-    if (!createTables()) {
-        closeInternal();
+bool Database::deleteVaultEntry(int64_t entryId, int64_t userId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const char *stmt = "DELETE FROM vault_entries WHERE id = $1 AND user_id = $2;";
+    const char *params[2] = {std::to_string(entryId).c_str(), std::to_string(userId).c_str()};
+    int lengths[2] = {static_cast<int>(std::strlen(params[0])), static_cast<int>(std::strlen(params[1]))};
+    int formats[2] = {0,0};
+    PGresult *res = PQexecParams(m_conn, stmt, 2, nullptr, params, lengths, formats, 0);
+    if (!res) {
+        logError(std::string("deleteVaultEntry PQexecParams failed: ") + PQerrorMessage(m_conn));
         return false;
     }
-
-    // 5. Run automatic schema migrations if legacy database exists
-    if (!migrateTables()) {
-        closeInternal();
-        return false;
+    bool ok = (PQresultStatus(res) == PGRES_COMMAND_OK);
+    if (!ok) {
+        logError(std::string("deleteVaultEntry failed: ") + PQerrorMessage(m_conn));
     }
-
-    return true;
+    PQclear(res);
+    return ok;
 }
 
 bool Database::createTables() {
-    // Table 1: users
-    // Storing Argon2id master password hash and per-user unique random vault salt
-    const std::string createUsersTable = R"(
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const std::string usersTable = R"(
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGSERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             email TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             vault_salt TEXT NOT NULL DEFAULT '',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     )";
+    if (!executeSQL(usersTable)) return false;
 
-    if (!executeRawLocked(createUsersTable)) {
-        std::cerr << "[Database Error] Failed to create 'users' table." << std::endl;
-        return false;
-    }
-
-    // Table 2: vault_entries
-    // Storing encrypted ciphertext, nonce, and separate favorite status
-    const std::string createVaultTable = R"(
+    const std::string vaultTable = R"(
         CREATE TABLE IF NOT EXISTS vault_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             encrypted_data TEXT NOT NULL DEFAULT '',
             data_nonce TEXT NOT NULL DEFAULT '',
             encryption_version INTEGER NOT NULL DEFAULT 2,
-            is_favorite INTEGER NOT NULL DEFAULT 0,
+            is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
             website TEXT DEFAULT '',
             website_url TEXT DEFAULT '',
             username TEXT DEFAULT '',
@@ -162,432 +435,19 @@ bool Database::createTables() {
             nonce TEXT DEFAULT '',
             category TEXT DEFAULT 'General',
             notes TEXT DEFAULT '',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         );
     )";
+    if (!executeSQL(vaultTable)) return false;
 
-    if (!executeRawLocked(createVaultTable)) {
-        std::cerr << "[Database Error] Failed to create 'vault_entries' table." << std::endl;
-        return false;
-    }
-
-    // Create index on user_id for fast lookup
-    const std::string createIndex = R"(
-        CREATE INDEX IF NOT EXISTS idx_vault_user_id ON vault_entries(user_id);
-    )";
-    executeRawLocked(createIndex);
-
+    const std::string indexStmt = "CREATE INDEX IF NOT EXISTS idx_vault_user_id ON vault_entries(user_id);";
+    executeSQL(indexStmt);
     return true;
 }
 
 bool Database::migrateTables() {
-    if (!m_db) return false;
-
-    // Helper to get columns for a table
-    auto getColumns = [this](const std::string& tableName) -> std::set<std::string> {
-        std::set<std::string> columns;
-        std::string sql = "PRAGMA table_info(" + tableName + ");";
-        sqlite3_stmt* stmtRaw = nullptr;
-        if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmtRaw, nullptr) == SQLITE_OK) {
-            UniqueStmt stmt(stmtRaw);
-            while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-                const unsigned char* name = sqlite3_column_text(stmt.get(), 1);
-                if (name) {
-                    columns.insert(reinterpret_cast<const char*>(name));
-                }
-            }
-        }
-        return columns;
-    };
-
-    // 1. Check users table
-    auto userCols = getColumns("users");
-    if (!userCols.empty() && userCols.find("vault_salt") == userCols.end()) {
-        std::cout << "[Database Migration] Adding 'vault_salt' column to 'users' table..." << std::endl;
-        if (!executeRawLocked("ALTER TABLE users ADD COLUMN vault_salt TEXT NOT NULL DEFAULT '';")) {
-            std::cerr << "[Database Error] Failed to add 'vault_salt' to 'users'." << std::endl;
-            return false;
-        }
-    }
-
-    // 2. Check vault_entries table
-    auto vaultCols = getColumns("vault_entries");
-    if (!vaultCols.empty()) {
-        if (vaultCols.find("encrypted_data") == vaultCols.end()) {
-            std::cout << "[Database Migration] Adding 'encrypted_data' column to 'vault_entries' table..." << std::endl;
-            executeRawLocked("ALTER TABLE vault_entries ADD COLUMN encrypted_data TEXT NOT NULL DEFAULT '';");
-        }
-        if (vaultCols.find("data_nonce") == vaultCols.end()) {
-            std::cout << "[Database Migration] Adding 'data_nonce' column to 'vault_entries' table..." << std::endl;
-            executeRawLocked("ALTER TABLE vault_entries ADD COLUMN data_nonce TEXT NOT NULL DEFAULT '';");
-        }
-        if (vaultCols.find("encryption_version") == vaultCols.end()) {
-            std::cout << "[Database Migration] Adding 'encryption_version' column to 'vault_entries' table..." << std::endl;
-            executeRawLocked("ALTER TABLE vault_entries ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1;");
-        }
-        if (vaultCols.find("is_favorite") == vaultCols.end()) {
-            std::cout << "[Database Migration] Adding 'is_favorite' column to 'vault_entries' table..." << std::endl;
-            executeRawLocked("ALTER TABLE vault_entries ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;");
-        }
-    }
-
+    // Placeholder – currently no migrations required.
+    // Future schema changes can be handled here.
     return true;
-}
-
-// ==========================================
-// Transactions
-// ==========================================
-
-bool Database::beginTransaction() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return executeRawLocked("BEGIN TRANSACTION;");
-}
-
-bool Database::commitTransaction() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return executeRawLocked("COMMIT;");
-}
-
-bool Database::rollbackTransaction() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return executeRawLocked("ROLLBACK;");
-}
-
-// ==========================================
-// User Operations (Prepared Statements)
-// ==========================================
-
-int64_t Database::createUser(const std::string& name, const std::string& email, 
-                             const std::string& passwordHash, const std::string& vaultSalt) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return -1;
-
-    const char* sql = "INSERT INTO users (name, email, password_hash, vault_salt) VALUES (?, ?, ?, ?);";
-    sqlite3_stmt* stmtRaw = nullptr;
-
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return -1;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    // Bind parameters safely to avoid SQL injection
-    sqlite3_bind_text(stmt.get(), 1, name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 2, email.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 3, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 4, vaultSalt.c_str(), -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        std::cerr << "[Database Error] Failed to insert user: " << sqlite3_errmsg(m_db) << std::endl;
-        return -1;
-    }
-
-    return sqlite3_last_insert_rowid(m_db);
-}
-
-std::optional<UserRecord> Database::getUserByEmail(const std::string& email) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return std::nullopt;
-
-    const char* sql = "SELECT id, name, email, password_hash, vault_salt, created_at FROM users WHERE email = ? LIMIT 1;";
-    sqlite3_stmt* stmtRaw = nullptr;
-
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return std::nullopt;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_text(stmt.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        UserRecord user;
-        user.id = sqlite3_column_int64(stmt.get(), 0);
-        user.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
-        user.email = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
-        user.password_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
-        
-        const unsigned char* salt = sqlite3_column_text(stmt.get(), 4);
-        user.vault_salt = salt ? reinterpret_cast<const char*>(salt) : "";
-
-        const unsigned char* createdAt = sqlite3_column_text(stmt.get(), 5);
-        user.created_at = createdAt ? reinterpret_cast<const char*>(createdAt) : "";
-        return user;
-    }
-
-    return std::nullopt;
-}
-
-std::optional<UserRecord> Database::getUserById(int64_t id) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return std::nullopt;
-
-    const char* sql = "SELECT id, name, email, password_hash, vault_salt, created_at FROM users WHERE id = ? LIMIT 1;";
-    sqlite3_stmt* stmtRaw = nullptr;
-
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return std::nullopt;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_int64(stmt.get(), 1, id);
-
-    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        UserRecord user;
-        user.id = sqlite3_column_int64(stmt.get(), 0);
-        user.name = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
-        user.email = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
-        user.password_hash = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 3));
-        
-        const unsigned char* salt = sqlite3_column_text(stmt.get(), 4);
-        user.vault_salt = salt ? reinterpret_cast<const char*>(salt) : "";
-
-        const unsigned char* createdAt = sqlite3_column_text(stmt.get(), 5);
-        user.created_at = createdAt ? reinterpret_cast<const char*>(createdAt) : "";
-        return user;
-    }
-
-    return std::nullopt;
-}
-
-// ==========================================
-// Vault Entry Operations (Prepared Statements)
-// ==========================================
-
-int64_t Database::createVaultEntry(const VaultEntryRecord& entry) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return -1;
-
-    const char* sql = R"(
-        INSERT INTO vault_entries 
-        (user_id, encrypted_data, data_nonce, encryption_version, is_favorite, 
-         website, website_url, username, encrypted_password, nonce, category, notes, 
-         created_at, updated_at) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'));
-    )";
-
-    sqlite3_stmt* stmtRaw = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return -1;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_int64(stmt.get(), 1, entry.user_id);
-    sqlite3_bind_text(stmt.get(), 2, entry.encrypted_data.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 3, entry.data_nonce.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt.get(), 4, entry.encryption_version);
-    sqlite3_bind_int(stmt.get(), 5, entry.is_favorite ? 1 : 0);
-
-    // Empty / default for legacy columns so existing constraints pass
-    sqlite3_bind_text(stmt.get(), 6, entry.website.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 7, entry.website_url.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 8, entry.username.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 9, entry.encrypted_password.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 10, entry.nonce.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 11, entry.category.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 12, entry.notes.c_str(), -1, SQLITE_TRANSIENT);
-
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        std::cerr << "[Database Error] Failed to create vault entry: " << sqlite3_errmsg(m_db) << std::endl;
-        return -1;
-    }
-
-    return sqlite3_last_insert_rowid(m_db);
-}
-
-std::vector<VaultEntryRecord> Database::getVaultEntriesByUserId(int64_t userId) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::vector<VaultEntryRecord> list;
-    if (!m_db) return list;
-
-    const char* sql = R"(
-        SELECT id, user_id, encrypted_data, data_nonce, encryption_version, is_favorite,
-               website, website_url, username, encrypted_password, nonce, category, notes,
-               created_at, updated_at 
-        FROM vault_entries 
-        WHERE user_id = ? 
-        ORDER BY updated_at DESC;
-    )";
-
-    sqlite3_stmt* stmtRaw = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return list;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_int64(stmt.get(), 1, userId);
-
-    const auto getStr = [&](int col) -> std::string {
-        const unsigned char* val = sqlite3_column_text(stmt.get(), col);
-        return val ? reinterpret_cast<const char*>(val) : "";
-    };
-
-    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        VaultEntryRecord entry;
-        entry.id = sqlite3_column_int64(stmt.get(), 0);
-        entry.user_id = sqlite3_column_int64(stmt.get(), 1);
-        entry.encrypted_data = getStr(2);
-        entry.data_nonce = getStr(3);
-        entry.encryption_version = sqlite3_column_int(stmt.get(), 4);
-        entry.is_favorite = (sqlite3_column_int(stmt.get(), 5) != 0);
-
-        entry.website = getStr(6);
-        entry.website_url = getStr(7);
-        entry.username = getStr(8);
-        entry.encrypted_password = getStr(9);
-        entry.nonce = getStr(10);
-        entry.category = getStr(11);
-        entry.notes = getStr(12);
-
-        entry.created_at = getStr(13);
-        entry.updated_at = getStr(14);
-
-        list.push_back(std::move(entry));
-    }
-
-    return list;
-}
-
-std::optional<VaultEntryRecord> Database::getVaultEntryById(int64_t entryId, int64_t userId) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return std::nullopt;
-
-    const char* sql = R"(
-        SELECT id, user_id, encrypted_data, data_nonce, encryption_version, is_favorite,
-               website, website_url, username, encrypted_password, nonce, category, notes,
-               created_at, updated_at 
-        FROM vault_entries 
-        WHERE id = ? AND user_id = ? 
-        LIMIT 1;
-    )";
-
-    sqlite3_stmt* stmtRaw = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return std::nullopt;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_int64(stmt.get(), 1, entryId);
-    sqlite3_bind_int64(stmt.get(), 2, userId);
-
-    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
-        const auto getStr = [&](int col) -> std::string {
-            const unsigned char* val = sqlite3_column_text(stmt.get(), col);
-            return val ? reinterpret_cast<const char*>(val) : "";
-        };
-
-        VaultEntryRecord entry;
-        entry.id = sqlite3_column_int64(stmt.get(), 0);
-        entry.user_id = sqlite3_column_int64(stmt.get(), 1);
-        entry.encrypted_data = getStr(2);
-        entry.data_nonce = getStr(3);
-        entry.encryption_version = sqlite3_column_int(stmt.get(), 4);
-        entry.is_favorite = (sqlite3_column_int(stmt.get(), 5) != 0);
-
-        entry.website = getStr(6);
-        entry.website_url = getStr(7);
-        entry.username = getStr(8);
-        entry.encrypted_password = getStr(9);
-        entry.nonce = getStr(10);
-        entry.category = getStr(11);
-        entry.notes = getStr(12);
-
-        entry.created_at = getStr(13);
-        entry.updated_at = getStr(14);
-
-        return entry;
-    }
-
-    return std::nullopt;
-}
-
-bool Database::updateVaultEntry(const VaultEntryRecord& entry) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return false;
-
-    const char* sql = R"(
-        UPDATE vault_entries 
-        SET encrypted_data = ?, data_nonce = ?, encryption_version = ?, is_favorite = ?, updated_at = datetime('now')
-        WHERE id = ? AND user_id = ?;
-    )";
-
-    sqlite3_stmt* stmtRaw = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return false;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_text(stmt.get(), 1, entry.encrypted_data.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt.get(), 2, entry.data_nonce.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt.get(), 3, entry.encryption_version);
-    sqlite3_bind_int(stmt.get(), 4, entry.is_favorite ? 1 : 0);
-    sqlite3_bind_int64(stmt.get(), 5, entry.id);
-    sqlite3_bind_int64(stmt.get(), 6, entry.user_id);
-
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        std::cerr << "[Database Error] Update failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return false;
-    }
-
-    return sqlite3_changes(m_db) > 0;
-}
-
-bool Database::setVaultEntryFavorite(int64_t entryId, int64_t userId, bool isFavorite) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return false;
-
-    const char* sql = R"(
-        UPDATE vault_entries 
-        SET is_favorite = ?, updated_at = datetime('now')
-        WHERE id = ? AND user_id = ?;
-    )";
-
-    sqlite3_stmt* stmtRaw = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return false;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_int(stmt.get(), 1, isFavorite ? 1 : 0);
-    sqlite3_bind_int64(stmt.get(), 2, entryId);
-    sqlite3_bind_int64(stmt.get(), 3, userId);
-
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        std::cerr << "[Database Error] Set favorite failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return false;
-    }
-
-    return sqlite3_changes(m_db) > 0;
-}
-
-bool Database::deleteVaultEntry(int64_t entryId, int64_t userId) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_db) return false;
-
-    const char* sql = "DELETE FROM vault_entries WHERE id = ? AND user_id = ?;";
-
-    sqlite3_stmt* stmtRaw = nullptr;
-    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
-        std::cerr << "[Database Error] Prepare failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return false;
-    }
-    UniqueStmt stmt(stmtRaw);
-
-    sqlite3_bind_int64(stmt.get(), 1, entryId);
-    sqlite3_bind_int64(stmt.get(), 2, userId);
-
-    if (sqlite3_step(stmt.get()) != SQLITE_DONE) {
-        std::cerr << "[Database Error] Delete failed: " << sqlite3_errmsg(m_db) << std::endl;
-        return false;
-    }
-
-    return sqlite3_changes(m_db) > 0;
 }

@@ -5,7 +5,9 @@
 
 static const char* const defaultOrigins[] = {
     "http://localhost:5174",
-    "http://localhost:5173"
+    "http://localhost:5173",
+    "http://127.0.0.1:5174",
+    "http://127.0.0.1:5173"
 };
 static const char* const allowedMethods = "GET, POST, PUT, DELETE, OPTIONS";
 static const char* const allowedHeaders = "Content-Type, Authorization, X-Requested-With, Accept, Origin";
@@ -39,13 +41,31 @@ static std::unordered_set<std::string> getAllowedOrigins() {
     return origins;
 }
 
+static bool isOriginAllowed(const std::string& origin) {
+    if (origin.empty()) {
+        return true;
+    }
+
+    // 1. Allow local development origins (localhost or 127.0.0.1 on any port)
+    if (origin.rfind("http://localhost:", 0) == 0 ||
+        origin.rfind("http://127.0.0.1:", 0) == 0 ||
+        origin.rfind("http://[::1]:", 0) == 0 ||
+        origin == "http://localhost" ||
+        origin == "http://127.0.0.1") {
+        return true;
+    }
+
+    // 2. Check explicitly configured production origins from FRONTEND_ORIGIN
+    const auto configured = getAllowedOrigins();
+    return (configured.count(origin) != 0);
+}
+
 void CORSMiddleware::addCorsHeaders(const crow::request& req, crow::response& res) {
     const std::string origin = req.get_header_value("Origin");
-    const auto allowedOrigins = getAllowedOrigins();
 
     if (origin.empty()) {
         res.set_header("Access-Control-Allow-Origin", "http://localhost:5174");
-    } else if (allowedOrigins.count(origin) != 0) {
+    } else if (isOriginAllowed(origin)) {
         res.set_header("Access-Control-Allow-Origin", origin);
     }
 

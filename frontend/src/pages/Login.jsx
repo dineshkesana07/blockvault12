@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { authAPI } from '../services/api';
+import { authAPI, API_BASE_URL } from '../services/api';
 
 export default function Login() {
   const { login } = useAuth();
@@ -30,7 +30,22 @@ export default function Login() {
         setError('Login failed. Please check your credentials.');
       }
     } catch (err) {
-      const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Login failed.';
+      let msg = 'Login failed. Please check your credentials.';
+      if (err.response?.data?.error) {
+        msg = err.response.data.error;
+      } else if (err.response?.data?.message) {
+        msg = err.response.data.message;
+      } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
+        msg = 'Connection timed out. Please verify that the C++ backend is responding.';
+      } else if (err.message === 'Network Error' || !err.response) {
+        msg = `Unable to connect to backend server at ${API_BASE_URL}. Please ensure the C++ backend is running on port 10000.`;
+      } else if (err.response?.status === 401) {
+        msg = 'Invalid email or master password.';
+      } else if (err.response?.status === 500) {
+        msg = 'Server encountered an internal error. Please try again later.';
+      } else if (err.message) {
+        msg = err.message;
+      }
       setError(msg);
     } finally {
       setLoading(false);

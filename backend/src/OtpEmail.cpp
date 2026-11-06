@@ -3,24 +3,133 @@
 #include <sodium.h>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <regex>
 #include <string>
+#include <string_view>
 
 namespace {
+enum class SmtpPhase {
+  Connection,
+  StartTls,
+  Authentication,
+  Sender,
+  Recipient,
+  MessageData,
+  Delivery,
+  Other
+};
+
+struct SmtpDebugContext {
+  SmtpPhase phase{SmtpPhase::Connection};
+  long responseCode{0};
+};
+
 bool isSafeHeaderValue(const std::string &value) {
-  return !value.empty() && value.find_first_of("\r\n\0") == std::string::npos;
+  return !value.empty() && value.find_first_of("\r\n") == std::string::npos &&
+         value.find('\0') == std::string::npos;
 }
 
 bool isValidSmtpRecipient(const std::string &email) {
   if (email.empty() || email.size() > 254) {
     return false;
   }
-  if (email.find_first_of("\r\n\0") != std::string::npos) {
+  if (email.find_first_of("\r\n") != std::string::npos ||
+      email.find('\0') != std::string::npos) {
     return false;
   }
   static const std::regex emailPattern(
       R"(^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$)");
   return std::regex_match(email, emailPattern);
+}
+
+size_t smtpDebugCallback(CURL *, curl_infotype type, char *data, size_t size,
+                         void *userData) {
+  auto *context = static_cast<SmtpDebugContext *>(userData);
+  if (type == CURLINFO_HEADER_OUT) {
+    const std::string_view command(data, size);
+    if (command.rfind("STARTTLS", 0) == 0) {
+      context->phase = SmtpPhase::StartTls;
+    } else if (command.rfind("AUTH", 0) == 0) {
+      context->phase = SmtpPhase::Authentication;
+    } else if (command.rfind("MAIL FROM:", 0) == 0) {
+      context->phase = SmtpPhase::Sender;
+    } else if (command.rfind("RCPT TO:", 0) == 0) {
+      context->phase = SmtpPhase::Recipient;
+    } else if (command.rfind("DATA", 0) == 0) {
+      context->phase = SmtpPhase::MessageData;
+    }
+  } else if (type == CURLINFO_HEADER_IN && size >= 3 &&
+             data[0] >= '0' && data[0] <= '9' &&
+             data[1] >= '0' && data[1] <= '9' &&
+             data[2] >= '0' && data[2] <= '9') {
+    context->responseCode =
+        (data[0] - '0') * 100 + (data[1] - '0') * 10 + (data[2] - '0');
+    if (context->phase == SmtpPhase::MessageData &&
+        context->responseCode == 354) {
+      context->phase = SmtpPhase::Delivery;
+    }
+  }
+  return 0;
+}
+
+const char *smtpFailureCategory(CURLcode result, SmtpPhase phase,
+                                long responseCode) {
+  switch (result) {
+  case CURLE_COULDNT_CONNECT:
+  case CURLE_OPERATION_TIMEDOUT:
+    return "connection failure or timeout";
+  case CURLE_USE_SSL_FAILED:
+  case CURLE_SSL_CONNECT_ERROR:
+  case CURLE_PEER_FAILED_VERIFICATION:
+  case CURLE_SSL_CERTPROBLEM:
+  case CURLE_SSL_CACERT_BADFILE:
+  case CURLE_SSL_CIPHER:
+  case CURLE_SSL_ISSUER_ERROR:
+    return "TLS negotiation or certificate verification failure";
+  case CURLE_LOGIN_DENIED:
+    return "SMTP authentication failure";
+  default:
+    break;
+  }
+
+  if ((phase == SmtpPhase::StartTls ||
+       phase == SmtpPhase::Authentication) &&
+      responseCode >= 400) {
+    return phase == SmtpPhase::StartTls
+               ? "SMTP server refused STARTTLS"
+               : "SMTP authentication rejection";
+  }
+
+  if (responseCode >= 400) {
+    if (phase == SmtpPhase::Sender) {
+      return "SMTP sender rejection";
+    }
+    if (phase == SmtpPhase::Recipient) {
+      return "SMTP recipient rejection";
+    }
+    if (phase == SmtpPhase::Delivery) {
+      return "SMTP server rejected message delivery";
+    }
+  }
+
+  switch (phase) {
+  case SmtpPhase::StartTls:
+    return "TLS negotiation failure";
+  case SmtpPhase::Authentication:
+    return "SMTP authentication exchange failure";
+  case SmtpPhase::Sender:
+  case SmtpPhase::Recipient:
+    return "SMTP connection failed during envelope negotiation";
+  case SmtpPhase::Delivery:
+    return "SMTP connection failed while submitting message";
+  case SmtpPhase::Connection:
+    return "SMTP connection or greeting failure";
+  case SmtpPhase::MessageData:
+  case SmtpPhase::Other:
+    return "SMTP protocol or transfer failure";
+  }
+  return "SMTP protocol or transfer failure";
 }
 
 struct SmtpConfig {
@@ -57,13 +166,22 @@ bool readConfig(SmtpConfig &config) {
       !isSafeHeaderValue(config.fromEmail) ||
       config.host.find('/') != std::string::npos ||
       config.fromEmail.find_first_of("<>") != std::string::npos) {
+    std::cerr << "[OTP email] SMTP configuration is missing or invalid; "
+                 "check SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, "
+                 "and SMTP_FROM_EMAIL. Values are not logged."
+              << std::endl;
     return false;
   }
 
   char *end = nullptr;
   config.port = std::strtol(port.c_str(), &end, 10);
-  return end != port.c_str() && *end == '\0' &&
-         config.port >= 1 && config.port <= 65535;
+  if (end == port.c_str() || *end != '\0' || config.port < 1 ||
+      config.port > 65535) {
+    std::cerr << "[OTP email] SMTP_PORT must be a number from 1 to 65535."
+              << std::endl;
+    return false;
+  }
+  return true;
 }
 
 std::string escapeHtml(const std::string &value) {
@@ -129,7 +247,11 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
                                     const std::string &otp) {
   if (!isValidSmtpRecipient(email) || otp.empty() ||
       otp.find_first_not_of("0123456789") != std::string::npos ||
-      name.find_first_of("\r\n\0") != std::string::npos) {
+      name.find_first_of("\r\n") != std::string::npos ||
+      name.find('\0') != std::string::npos) {
+    std::cerr << "[OTP email] Refusing to send due to invalid recipient or "
+                 "message fields."
+              << std::endl;
     return false;
   }
 
@@ -140,6 +262,8 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
 
   static const bool curlInitialized = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
   if (!curlInitialized) {
+    std::cerr << "[OTP email] libcurl global initialization failed."
+              << std::endl;
     return false;
   }
 
@@ -169,6 +293,8 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
 
   CURL *curl = curl_easy_init();
   if (!curl) {
+    std::cerr << "[OTP email] Could not allocate a libcurl SMTP handle."
+              << std::endl;
     wipeMessage(message);
     return false;
   }
@@ -176,6 +302,8 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
   curl_slist *recipients = nullptr;
   recipients = curl_slist_append(recipients, ("<" + email + ">").c_str());
   if (!recipients) {
+    std::cerr << "[OTP email] Could not allocate the SMTP recipient list."
+              << std::endl;
     curl_easy_cleanup(curl);
     wipeMessage(message);
     return false;
@@ -186,27 +314,71 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
       scheme + config.host + ":" + std::to_string(config.port);
   const std::string envelopeFrom = "<" + config.fromEmail + ">";
   MessageReadContext readContext{message};
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_USERNAME, config.username.c_str());
-  curl_easy_setopt(curl, CURLOPT_PASSWORD, config.password.c_str());
-  curl_easy_setopt(curl, CURLOPT_MAIL_FROM, envelopeFrom.c_str());
-  curl_easy_setopt(curl, CURLOPT_MAIL_RCPT, recipients);
+  SmtpDebugContext debugContext;
+  const auto setOption = [curl](CURLoption option, auto value) {
+    return curl_easy_setopt(curl, option, value) == CURLE_OK;
+  };
+  bool optionsSet =
+      setOption(CURLOPT_URL, url.c_str()) &&
+      setOption(CURLOPT_USERNAME, config.username.c_str()) &&
+      setOption(CURLOPT_PASSWORD, config.password.c_str()) &&
+      setOption(CURLOPT_MAIL_FROM, envelopeFrom.c_str()) &&
+      setOption(CURLOPT_MAIL_RCPT, recipients) &&
+      setOption(CURLOPT_DEBUGFUNCTION, smtpDebugCallback) &&
+      setOption(CURLOPT_DEBUGDATA, &debugContext);
   if (config.port != 465) {
-    curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
+    optionsSet = optionsSet &&
+                 setOption(CURLOPT_USE_SSL, CURLUSESSL_ALL);
   }
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
-  curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-  curl_easy_setopt(curl, CURLOPT_READFUNCTION, readMessage);
-  curl_easy_setopt(curl, CURLOPT_READDATA, &readContext);
-  curl_easy_setopt(curl, CURLOPT_INFILESIZE_LARGE,
-                   static_cast<curl_off_t>(message.size()));
+  optionsSet = optionsSet &&
+               setOption(CURLOPT_SSL_VERIFYPEER, 1L) &&
+               setOption(CURLOPT_SSL_VERIFYHOST, 2L) &&
+               setOption(CURLOPT_CONNECTTIMEOUT, 10L) &&
+               setOption(CURLOPT_TIMEOUT, 20L) &&
+               setOption(CURLOPT_UPLOAD, 1L) &&
+               setOption(CURLOPT_READFUNCTION, readMessage) &&
+               setOption(CURLOPT_READDATA, &readContext) &&
+               setOption(CURLOPT_INFILESIZE_LARGE,
+                         static_cast<curl_off_t>(message.size()));
 
-  const CURLcode result = curl_easy_perform(curl);
+  CURLcode result = CURLE_OK;
+  long responseCode = 0;
+  if (!optionsSet) {
+    std::cerr << "[OTP email] Failed to configure a libcurl SMTP option."
+              << std::endl;
+    curl_slist_free_all(recipients);
+    curl_easy_cleanup(curl);
+    wipeMessage(message);
+    return false;
+  } else {
+    // Keep verbose output inside the redacting callback; never emit SMTP data.
+    result = curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+    if (result != CURLE_OK) {
+      std::cerr << "[OTP email] Failed to enable safe SMTP diagnostics."
+                << std::endl;
+      curl_slist_free_all(recipients);
+      curl_easy_cleanup(curl);
+      wipeMessage(message);
+      return false;
+    }
+    result = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+  }
+
+  if (debugContext.responseCode != 0) {
+    responseCode = debugContext.responseCode;
+  }
   curl_slist_free_all(recipients);
   curl_easy_cleanup(curl);
   wipeMessage(message);
-  return result == CURLE_OK;
+  if (result != CURLE_OK) {
+    std::cerr << "[OTP email] "
+              << smtpFailureCategory(result, debugContext.phase, responseCode)
+              << " (libcurl=" << static_cast<int>(result)
+              << ", SMTP response=" << responseCode
+              << "). No credentials, addresses, or OTP values were logged."
+              << std::endl;
+    return false;
+  }
+  return true;
 }

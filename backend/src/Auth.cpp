@@ -251,6 +251,9 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
 
     std::string otpHash;
     if (!getOtpHash(email, "configuration-check", otpHash)) {
+        std::cerr << "[OTP email] OTP_HASH_SECRET is missing or shorter than "
+                     "32 bytes; its value is not logged."
+                  << std::endl;
         result.status = OtpFlowStatus::ConfigurationError;
         result.message = "Email verification is not configured. Set OTP_HASH_SECRET to a secret value of at least 32 characters on the backend.";
         return result;
@@ -259,7 +262,7 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
     const auto existingUser = m_db->getUserByEmail(email);
     if (existingUser.has_value()) {
         result.status = OtpFlowStatus::Accepted;
-        result.message = "If this email can be registered, a verification code has been sent.";
+        result.message = "If this email can be registered, a verification code has been submitted for delivery.";
         result.retry_after_seconds = 60;
         return result;
     }
@@ -290,7 +293,7 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
     }
 
     result.status = OtpFlowStatus::Accepted;
-    result.message = "If this email can be registered, a verification code has been sent.";
+    result.message = "If this email can be registered, a verification code has been submitted for delivery.";
     result.retry_after_seconds = 60;
     if (createStatus != PendingSignupCreateStatus::Created) {
         return result;
@@ -328,6 +331,9 @@ OtpFlowResult Auth::resendRegistrationOtp(const std::string& submittedEmail) {
     SensitiveStringWiper otpWiper{otp};
     std::string otpHash;
     if (!getOtpHash(email, otp, otpHash)) {
+        std::cerr << "[OTP email] OTP_HASH_SECRET is missing or shorter than "
+                     "32 bytes; its value is not logged."
+                  << std::endl;
         result.status = OtpFlowStatus::ConfigurationError;
         result.message = "Email verification is not configured. Set OTP_HASH_SECRET to a secret value of at least 32 characters on the backend.";
         return result;
@@ -364,7 +370,7 @@ OtpFlowResult Auth::resendRegistrationOtp(const std::string& submittedEmail) {
         return result;
     }
     result.status = OtpFlowStatus::Accepted;
-    result.message = "If this email can be registered, a verification code has been sent.";
+    result.message = "If this email can be registered, a verification code has been submitted for delivery.";
     result.retry_after_seconds = 60;
     return result;
 }
@@ -393,6 +399,9 @@ OtpFlowResult Auth::verifyRegistrationOtp(const std::string& submittedEmail,
     std::string otpHash;
     const std::string candidateOtp = otp.size() == 6 ? otp : "invalid";
     if (!getOtpHash(email, candidateOtp, otpHash)) {
+        std::cerr << "[OTP email] OTP_HASH_SECRET is missing or shorter than "
+                     "32 bytes; its value is not logged."
+                  << std::endl;
         result.status = OtpFlowStatus::ConfigurationError;
         result.message = "Email verification is not configured. Set OTP_HASH_SECRET to a secret value of at least 32 characters on the backend.";
         return result;

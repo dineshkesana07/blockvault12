@@ -60,12 +60,22 @@ The server starts on: **`http://127.0.0.1:10000`** by default.
 
 Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
 `SMTP_FROM_EMAIL`, and a persistent random `OTP_HASH_SECRET` (at least 32
-characters) in the backend environment. Gmail uses `smtp.gmail.com`, port
-`587`, and an App Password. Never put these values in `VITE_` variables.
+characters) in the backend environment. For Render, add these under the service's
+Environment settings; the container reads values provided by Render and does not
+load a repository `.env` file. Gmail uses `smtp.gmail.com`, port `587`, the full
+Gmail address as `SMTP_USERNAME`, and a Google App Password as `SMTP_PASSWORD`.
+`SMTP_FROM_EMAIL` must be that Gmail address or a verified Gmail "send mail as"
+alias. Port 587 uses required STARTTLS with certificate and hostname verification.
+Never put these values in `VITE_` variables.
 OTP codes expire after five minutes, are limited to five guesses and five
 messages per hour per address, and can be resent once per 60 seconds. Existing
 SQLite user accounts remain active; only newly registered users need OTP
 verification.
+
+SMTP errors are categorized in backend logs without logging credentials,
+addresses, message content, or OTP values. A successful SMTP submission only
+means the SMTP server accepted the message for processing; it does not guarantee
+delivery to the recipient's inbox.
 
 ---
 
@@ -108,7 +118,7 @@ verification.
 * **Expected Response (`202 Accepted`)** (the code is sent by email and is never returned by the API):
 ```json
 {
-  "message": "If this email can be registered, a verification code has been sent.",
+  "message": "If this email can be registered, a verification code has been submitted for delivery.",
   "success": true,
   "retry_after_seconds": 60
 }

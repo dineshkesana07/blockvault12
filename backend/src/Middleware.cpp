@@ -42,20 +42,6 @@ static std::unordered_set<std::string> getAllowedOrigins() {
 }
 
 static bool isOriginAllowed(const std::string& origin) {
-    if (origin.empty()) {
-        return true;
-    }
-
-    // 1. Allow local development origins (localhost or 127.0.0.1 on any port)
-    if (origin.rfind("http://localhost:", 0) == 0 ||
-        origin.rfind("http://127.0.0.1:", 0) == 0 ||
-        origin.rfind("http://[::1]:", 0) == 0 ||
-        origin == "http://localhost" ||
-        origin == "http://127.0.0.1") {
-        return true;
-    }
-
-    // 2. Check explicitly configured production origins from FRONTEND_ORIGIN
     const auto configured = getAllowedOrigins();
     return (configured.count(origin) != 0);
 }
@@ -63,9 +49,7 @@ static bool isOriginAllowed(const std::string& origin) {
 void CORSMiddleware::addCorsHeaders(const crow::request& req, crow::response& res) {
     const std::string origin = req.get_header_value("Origin");
 
-    if (origin.empty()) {
-        res.set_header("Access-Control-Allow-Origin", "http://localhost:5174");
-    } else if (isOriginAllowed(origin)) {
+    if (!origin.empty() && isOriginAllowed(origin)) {
         res.set_header("Access-Control-Allow-Origin", origin);
     }
 

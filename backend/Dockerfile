@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     automake \
     libtool \
     pkg-config \
+    libcurl4-openssl-dev \
     xz-utils \
     unzip \
     file \
@@ -53,6 +54,7 @@ RUN curl -fL -o asio.tar.gz \
 COPY CMakeLists.txt ./
 COPY include/ include/
 COPY src/ src/
+COPY tests/ tests/
 
 # ---------- Configure and build with CMake ----------
 RUN cmake -S . -B build -G "Ninja" \
@@ -71,6 +73,7 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    libcurl4 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
@@ -95,8 +98,6 @@ USER blockvault
 ENV PORT=10000
 ENV DB_PATH=/var/data/blockvault.db
 ENV HOST=0.0.0.0
-ENV FRONTEND_ORIGIN=*
-
 EXPOSE 10000
 
 # Health check

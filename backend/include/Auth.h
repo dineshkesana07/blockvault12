@@ -32,6 +32,25 @@ struct AuthResult {
     std::string vault_salt; // Stored per-user random salt (internal C++ only, never returned to frontend)
 };
 
+enum class OtpFlowStatus {
+    Accepted,
+    Cooldown,
+    RateLimited,
+    Invalid,
+    Expired,
+    TooManyAttempts,
+    ConfigurationError,
+    EmailError,
+    Error
+};
+
+struct OtpFlowResult {
+    OtpFlowStatus status{OtpFlowStatus::Error};
+    std::string message;
+    int retry_after_seconds{0};
+    AuthResult auth;
+};
+
 /**
  * @brief Handles user authentication, registration, password hashing, and session management.
  */
@@ -50,15 +69,15 @@ public:
     Auth(const Auth&) = delete;
     Auth& operator=(const Auth&) = delete;
 
-    /**
-     * @brief Registers a new user with a unique random vault salt and Argon2id password hash.
-     *
-     * @param name User's full or display name.
-     * @param email User's email address.
-     * @param masterPassword Plain-text master password.
-     * @return AuthResult with status, session token, and vault salt if successful.
-     */
-    AuthResult registerUser(const std::string& name, const std::string& email, const std::string& masterPassword);
+    OtpFlowResult beginRegistration(const std::string& name,
+                                    const std::string& email,
+                                    const std::string& masterPassword);
+
+    OtpFlowResult resendRegistrationOtp(const std::string& email);
+
+    OtpFlowResult verifyRegistrationOtp(const std::string& email,
+                                        const std::string& otp,
+                                        const std::string& masterPassword);
 
     /**
      * @brief Authenticates an existing user and returns their stored vault salt for key derivation.
@@ -131,6 +150,9 @@ private:
     mutable std::mutex m_sessionMutex;
     // Maps session_token -> SessionInfo
     std::unordered_map<std::string, SessionInfo> m_sessions;
+
+    OtpFlowResult createSessionForUser(const UserRecord& user,
+                                       const std::string& message);
 
     /**
      * @brief Cleans up expired sessions from the in-memory session map.

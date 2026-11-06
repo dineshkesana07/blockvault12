@@ -2,6 +2,7 @@
 #include <iostream>
 #include <memory>
 #include <set>
+#include <sodium.h>
 
 namespace {
     // Helper RAII wrapper for sqlite3_stmt to guarantee sqlite3_finalize is always called
@@ -145,7 +146,33 @@ bool Database::createTables() {
         return false;
     }
 
-    // Table 2: vault_entries
+    const std::string createPendingSignupsTable = R"(
+        CREATE TABLE IF NOT EXISTS pending_signups (
+            email TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            vault_salt TEXT NOT NULL,
+            otp_hash TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_sent_at INTEGER NOT NULL,
+            send_window_started INTEGER NOT NULL,
+            send_count INTEGER NOT NULL DEFAULT 1
+        );
+    )";
+
+    if (!executeRawLocked(createPendingSignupsTable)) {
+        std::cerr << "[Database Error] Failed to create 'pending_signups' table." << std::endl;
+        return false;
+    }
+    if (!executeRawLocked(
+            "DELETE FROM pending_signups WHERE last_sent_at < "
+            "CAST(strftime('%s','now') AS INTEGER) - 86400;")) {
+        std::cerr << "[Database Error] Failed to clean expired signup requests." << std::endl;
+        return false;
+    }
+
+    // Table 3: vault_entries
     // Storing encrypted ciphertext, nonce, and separate favorite status
     const std::string createVaultTable = R"(
         CREATE TABLE IF NOT EXISTS vault_entries (
@@ -351,6 +378,296 @@ std::optional<UserRecord> Database::getUserById(int64_t id) {
     }
 
     return std::nullopt;
+}
+
+PendingSignupCreateStatus Database::createPendingSignup(
+    const std::string& name, const std::string& email,
+    const std::string& passwordHash, const std::string& vaultSalt,
+    const std::string& otpHash, int64_t expiresAt, int64_t now) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_db || !executeRawLocked("BEGIN IMMEDIATE;")) {
+        return PendingSignupCreateStatus::Error;
+    }
+
+    auto rollback = [this]() { executeRawLocked("ROLLBACK;"); };
+    sqlite3_stmt* stmtRaw = nullptr;
+
+    if (sqlite3_prepare_v2(m_db, "SELECT 1 FROM users WHERE email = ? LIMIT 1;",
+                           -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return PendingSignupCreateStatus::Error;
+    }
+    UniqueStmt existingUser(stmtRaw);
+    sqlite3_bind_text(existingUser.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
+    const int userStep = sqlite3_step(existingUser.get());
+    if (userStep == SQLITE_ROW) {
+        existingUser.reset();
+        if (!executeRawLocked("COMMIT;")) {
+            rollback();
+            return PendingSignupCreateStatus::Error;
+        }
+        return PendingSignupCreateStatus::AlreadyRegistered;
+    }
+    if (userStep != SQLITE_DONE) {
+        rollback();
+        return PendingSignupCreateStatus::Error;
+    }
+    existingUser.reset();
+
+    if (sqlite3_prepare_v2(m_db, "SELECT 1 FROM pending_signups WHERE email = ?;",
+                           -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return PendingSignupCreateStatus::Error;
+    }
+    UniqueStmt existingPending(stmtRaw);
+    sqlite3_bind_text(existingPending.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
+    const int pendingStep = sqlite3_step(existingPending.get());
+    if (pendingStep == SQLITE_ROW) {
+        existingPending.reset();
+        if (!executeRawLocked("COMMIT;")) {
+            rollback();
+            return PendingSignupCreateStatus::Error;
+        }
+        return PendingSignupCreateStatus::AlreadyPending;
+    }
+    if (pendingStep != SQLITE_DONE) {
+        rollback();
+        return PendingSignupCreateStatus::Error;
+    }
+    existingPending.reset();
+
+    const char* sql = R"(
+        INSERT INTO pending_signups
+            (email, name, password_hash, vault_salt, otp_hash, expires_at,
+             attempts, last_sent_at, send_window_started, send_count)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 1);
+    )";
+    if (sqlite3_prepare_v2(m_db, sql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return PendingSignupCreateStatus::Error;
+    }
+    UniqueStmt insert(stmtRaw);
+    sqlite3_bind_text(insert.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 2, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 3, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 4, vaultSalt.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 5, otpHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(insert.get(), 6, expiresAt);
+    sqlite3_bind_int64(insert.get(), 7, now);
+    sqlite3_bind_int64(insert.get(), 8, now);
+    if (sqlite3_step(insert.get()) != SQLITE_DONE ||
+        !executeRawLocked("COMMIT;")) {
+        rollback();
+        return PendingSignupCreateStatus::Error;
+    }
+    return PendingSignupCreateStatus::Created;
+}
+
+OtpResendStatus Database::refreshPendingSignupOtp(
+    const std::string& email, const std::string& otpHash,
+    int64_t expiresAt, int64_t now) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_db || !executeRawLocked("BEGIN IMMEDIATE;")) {
+        return OtpResendStatus::Error;
+    }
+
+    auto rollback = [this]() { executeRawLocked("ROLLBACK;"); };
+    sqlite3_stmt* stmtRaw = nullptr;
+    const char* selectSql =
+        "SELECT last_sent_at, send_window_started, send_count "
+        "FROM pending_signups WHERE email = ?;";
+    if (sqlite3_prepare_v2(m_db, selectSql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return OtpResendStatus::Error;
+    }
+    UniqueStmt select(stmtRaw);
+    sqlite3_bind_text(select.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
+    const int step = sqlite3_step(select.get());
+    if (step == SQLITE_DONE) {
+        if (!executeRawLocked("COMMIT;")) {
+            rollback();
+            return OtpResendStatus::Error;
+        }
+        return OtpResendStatus::NotFound;
+    }
+    if (step != SQLITE_ROW) {
+        rollback();
+        return OtpResendStatus::Error;
+    }
+
+    const int64_t lastSentAt = sqlite3_column_int64(select.get(), 0);
+    const int64_t windowStarted = sqlite3_column_int64(select.get(), 1);
+    const int sendCount = sqlite3_column_int(select.get(), 2);
+    select.reset();
+
+    if (now - lastSentAt < 60) {
+        if (!executeRawLocked("COMMIT;")) {
+            rollback();
+            return OtpResendStatus::Error;
+        }
+        return OtpResendStatus::Cooldown;
+    }
+    const bool resetWindow = now - windowStarted >= 3600;
+    if (!resetWindow && sendCount >= 5) {
+        if (!executeRawLocked("COMMIT;")) {
+            rollback();
+            return OtpResendStatus::Error;
+        }
+        return OtpResendStatus::RateLimited;
+    }
+
+    const char* updateSql = R"(
+        UPDATE pending_signups
+        SET otp_hash = ?, expires_at = ?, attempts = 0, last_sent_at = ?,
+            send_window_started = ?, send_count = ?
+        WHERE email = ?;
+    )";
+    if (sqlite3_prepare_v2(m_db, updateSql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return OtpResendStatus::Error;
+    }
+    UniqueStmt update(stmtRaw);
+    sqlite3_bind_text(update.get(), 1, otpHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(update.get(), 2, expiresAt);
+    sqlite3_bind_int64(update.get(), 3, now);
+    sqlite3_bind_int64(update.get(), 4, resetWindow ? now : windowStarted);
+    sqlite3_bind_int(update.get(), 5, resetWindow ? 1 : sendCount + 1);
+    sqlite3_bind_text(update.get(), 6, email.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(update.get()) != SQLITE_DONE ||
+        !executeRawLocked("COMMIT;")) {
+        rollback();
+        return OtpResendStatus::Error;
+    }
+    return OtpResendStatus::Updated;
+}
+
+OtpVerificationResult Database::verifyPendingSignupOtp(
+    const std::string& email, const std::string& otpHash, int64_t now,
+    const std::string& masterPassword) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    OtpVerificationResult result;
+    if (!m_db || !executeRawLocked("BEGIN IMMEDIATE;")) {
+        return result;
+    }
+
+    auto rollback = [this]() { executeRawLocked("ROLLBACK;"); };
+    sqlite3_stmt* stmtRaw = nullptr;
+    const char* selectSql = R"(
+        SELECT name, password_hash, vault_salt, otp_hash, expires_at, attempts
+        FROM pending_signups WHERE email = ?;
+    )";
+    if (sqlite3_prepare_v2(m_db, selectSql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return result;
+    }
+    UniqueStmt select(stmtRaw);
+    sqlite3_bind_text(select.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
+    const int step = sqlite3_step(select.get());
+    if (step == SQLITE_DONE) {
+        if (executeRawLocked("COMMIT;")) {
+            result.status = OtpVerificationStatus::Invalid;
+        } else {
+            rollback();
+        }
+        return result;
+    }
+    if (step != SQLITE_ROW) {
+        rollback();
+        return result;
+    }
+
+    auto getText = [&select](int column) {
+        const unsigned char* text = sqlite3_column_text(select.get(), column);
+        return text ? reinterpret_cast<const char*>(text) : "";
+    };
+    const std::string name = getText(0);
+    const std::string passwordHash = getText(1);
+    const std::string vaultSalt = getText(2);
+    const std::string storedHash = getText(3);
+    const int64_t expiresAt = sqlite3_column_int64(select.get(), 4);
+    const int attempts = sqlite3_column_int(select.get(), 5);
+    select.reset();
+
+    if (attempts >= 5) {
+        result.status = OtpVerificationStatus::TooManyAttempts;
+        if (!executeRawLocked("COMMIT;")) {
+            rollback();
+            result.status = OtpVerificationStatus::Error;
+        }
+        return result;
+    }
+    if (expiresAt <= now) {
+        result.status = OtpVerificationStatus::Expired;
+        if (!executeRawLocked("COMMIT;")) {
+            rollback();
+            result.status = OtpVerificationStatus::Error;
+        }
+        return result;
+    }
+
+    const bool otpMatches = storedHash.size() == otpHash.size() &&
+        sodium_memcmp(storedHash.data(), otpHash.data(), otpHash.size()) == 0;
+    const bool passwordMatches = otpMatches &&
+        crypto_pwhash_str_verify(passwordHash.c_str(), masterPassword.c_str(),
+                                 masterPassword.size()) == 0;
+    const bool matches = otpMatches && passwordMatches;
+    if (!matches) {
+        const char* updateSql =
+            "UPDATE pending_signups SET attempts = attempts + 1 WHERE email = ?;";
+        if (sqlite3_prepare_v2(m_db, updateSql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
+            rollback();
+            return result;
+        }
+        UniqueStmt update(stmtRaw);
+        sqlite3_bind_text(update.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(update.get()) != SQLITE_DONE ||
+            !executeRawLocked("COMMIT;")) {
+            rollback();
+            return result;
+        }
+        result.status = attempts + 1 >= 5
+            ? OtpVerificationStatus::TooManyAttempts
+            : OtpVerificationStatus::Invalid;
+        return result;
+    }
+
+    const char* insertSql =
+        "INSERT INTO users (name, email, password_hash, vault_salt) "
+        "VALUES (?, ?, ?, ?);";
+    if (sqlite3_prepare_v2(m_db, insertSql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return result;
+    }
+    UniqueStmt insert(stmtRaw);
+    sqlite3_bind_text(insert.get(), 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 2, email.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 3, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 4, vaultSalt.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+        rollback();
+        return result;
+    }
+    result.user.id = sqlite3_last_insert_rowid(m_db);
+    result.user.name = name;
+    result.user.email = email;
+    result.user.password_hash = passwordHash;
+    result.user.vault_salt = vaultSalt;
+    insert.reset();
+
+    const char* deleteSql = "DELETE FROM pending_signups WHERE email = ?;";
+    if (sqlite3_prepare_v2(m_db, deleteSql, -1, &stmtRaw, nullptr) != SQLITE_OK) {
+        rollback();
+        return result;
+    }
+    UniqueStmt remove(stmtRaw);
+    sqlite3_bind_text(remove.get(), 1, email.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(remove.get()) != SQLITE_DONE ||
+        !executeRawLocked("COMMIT;")) {
+        rollback();
+        return result;
+    }
+    result.status = OtpVerificationStatus::Verified;
+    return result;
 }
 
 // ==========================================

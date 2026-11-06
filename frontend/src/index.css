@@ -2,3 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+html {
+  min-width: 320px;
+  background: #000000;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: #000000;
+  color: #ffffff;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+button,
+a,
+input {
+  -webkit-tap-highlight-color: transparent;
+}

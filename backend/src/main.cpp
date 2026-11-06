@@ -11,6 +11,56 @@
 
 using json = nlohmann::json;
 
+namespace {
+crow::response jsonResponse(int status, const json &body) {
+  crow::response response(status, body.dump());
+  response.set_header("Content-Type", "application/json; charset=utf-8");
+  return response;
+}
+
+crow::response otpFailureResponse(const OtpFlowResult &result) {
+  int status = 500;
+  switch (result.status) {
+  case OtpFlowStatus::Cooldown:
+  case OtpFlowStatus::RateLimited:
+  case OtpFlowStatus::TooManyAttempts:
+    status = 429;
+    break;
+  case OtpFlowStatus::Invalid:
+    status = 400;
+    break;
+  case OtpFlowStatus::Expired:
+    status = 410;
+    break;
+  case OtpFlowStatus::ConfigurationError:
+    status = 503;
+    break;
+  case OtpFlowStatus::EmailError:
+    status = 502;
+    break;
+  case OtpFlowStatus::Accepted:
+  case OtpFlowStatus::Error:
+    break;
+  }
+
+  json body = {{"success", false}, {"error", result.message}};
+  if (result.retry_after_seconds > 0) {
+    body["retry_after_seconds"] = result.retry_after_seconds;
+  }
+  return jsonResponse(status, body);
+}
+
+json authenticatedUserResponse(const AuthResult &result) {
+  return {{"success", true},
+          {"message", result.message},
+          {"token", result.token},
+          {"user",
+           {{"id", result.user_id},
+            {"name", result.name},
+            {"email", result.email}}}};
+}
+} // namespace
+
 int main() {
   std::cout << "========================================" << std::endl;
   std::cout << "   BLOCKVAULT C++ Backend Server Starting" << std::endl;
@@ -57,48 +107,105 @@ int main() {
     json res = {{"status", "online"},
                 {"service", "BlockVault C++ API"},
                 {"version", "1.0.0"}};
-    return crow::response(200, res.dump());
+    return jsonResponse(200, res);
   });
 
   // ==========================================
   // Authentication Endpoints
   // ==========================================
 
-  // POST /api/auth/register
-  CROW_ROUTE(app, "/api/auth/register")
+  // POST /api/auth/signup
+  CROW_ROUTE(app, "/api/auth/signup")
       .methods(crow::HTTPMethod::Post)([&auth](const crow::request &req) {
         json body;
         try {
           body = json::parse(req.body);
         } catch (...) {
-          return crow::response(
-              400, json({{"error", "Invalid JSON payload."}}).dump());
+          return jsonResponse(400, json({{"error", "Invalid JSON payload."}}));
         }
 
-        std::string name = body.value("name", "");
-        std::string email = body.value("email", "");
-        std::string masterPassword = body.value("master_password", "");
-
-        AuthResult result = auth->registerUser(name, email, masterPassword);
-        if (!result.success) {
-          return crow::response(400, json({{"error", result.message}}).dump());
+        if (!body.is_object() || !body.contains("name") ||
+            !body["name"].is_string() || !body.contains("email") ||
+            !body["email"].is_string() || !body.contains("master_password") ||
+            !body["master_password"].is_string()) {
+          return jsonResponse(
+              400, json({{"success", false}, {"error", "Name, email, and password are required."}}));
         }
 
-        // Derive vault key from master password and per-user unique random vault salt
-        SecureKey vaultKey = Encryption::deriveVaultKey(masterPassword, result.vault_salt);
+        OtpFlowResult result = auth->beginRegistration(
+            body["name"].get<std::string>(),
+            body["email"].get<std::string>(),
+            body["master_password"].get<std::string>());
+        if (result.status != OtpFlowStatus::Accepted) {
+          return otpFailureResponse(result);
+        }
+        return jsonResponse(
+            202, json({{"success", true},
+                       {"message", result.message},
+                       {"retry_after_seconds", result.retry_after_seconds}}));
+      });
+
+  // POST /api/auth/resend-otp
+  CROW_ROUTE(app, "/api/auth/resend-otp")
+      .methods(crow::HTTPMethod::Post)([&auth](const crow::request &req) {
+        json body;
+        try {
+          body = json::parse(req.body);
+        } catch (...) {
+          return jsonResponse(
+              400, json({{"success", false}, {"error", "Invalid JSON payload."}}));
+        }
+        if (!body.is_object() || !body.contains("email") ||
+            !body["email"].is_string()) {
+          return jsonResponse(
+              400, json({{"success", false}, {"error", "A valid email is required."}}));
+        }
+
+        OtpFlowResult result =
+            auth->resendRegistrationOtp(body["email"].get<std::string>());
+        if (result.status != OtpFlowStatus::Accepted) {
+          return otpFailureResponse(result);
+        }
+        return jsonResponse(
+            200, json({{"success", true},
+                       {"message", result.message},
+                       {"retry_after_seconds", result.retry_after_seconds}}));
+      });
+
+  // POST /api/auth/verify-otp
+  CROW_ROUTE(app, "/api/auth/verify-otp")
+      .methods(crow::HTTPMethod::Post)([&auth](const crow::request &req) {
+        json body;
+        try {
+          body = json::parse(req.body);
+        } catch (...) {
+          return jsonResponse(
+              400, json({{"success", false}, {"error", "Invalid JSON payload."}}));
+        }
+        if (!body.is_object() || !body.contains("email") ||
+            !body["email"].is_string() || !body.contains("otp") ||
+            !body["otp"].is_string() || !body.contains("master_password") ||
+            !body["master_password"].is_string()) {
+          return jsonResponse(
+              400, json({{"success", false}, {"error", "Email, password, and verification code are required."}}));
+        }
+
+        OtpFlowResult result = auth->verifyRegistrationOtp(
+            body["email"].get<std::string>(), body["otp"].get<std::string>(),
+            body["master_password"].get<std::string>());
+        if (result.status != OtpFlowStatus::Accepted) {
+          return otpFailureResponse(result);
+        }
+
+        SecureKey vaultKey = Encryption::deriveVaultKey(
+            body["master_password"].get<std::string>(), result.auth.vault_salt);
         if (!vaultKey.isValid()) {
-          return crow::response(500, json({{"error", "Failed to derive vault encryption key."}}).dump());
+          auth->logoutUser(result.auth.token);
+          return jsonResponse(
+              500, json({{"success", false}, {"error", "Failed to derive vault encryption key."}}));
         }
-        SessionKeyStore::instance().storeKey(result.token, std::move(vaultKey));
-
-        json resp = {{"success", true},
-                     {"message", result.message},
-                     {"token", result.token},
-                     {"user",
-                      {{"id", result.user_id},
-                       {"name", result.name},
-                       {"email", result.email}}}};
-        return crow::response(201, resp.dump());
+        SessionKeyStore::instance().storeKey(result.auth.token, std::move(vaultKey));
+        return jsonResponse(200, authenticatedUserResponse(result.auth));
       });
 
   // POST /api/auth/login
@@ -108,33 +215,34 @@ int main() {
         try {
           body = json::parse(req.body);
         } catch (...) {
-          return crow::response(
-              400, json({{"error", "Invalid JSON payload."}}).dump());
+          return jsonResponse(400, json({{"error", "Invalid JSON payload."}}));
         }
 
-        std::string email = body.value("email", "");
-        std::string masterPassword = body.value("master_password", "");
+        if (!body.is_object() || !body.contains("email") ||
+            !body["email"].is_string() || !body.contains("master_password") ||
+            !body["master_password"].is_string()) {
+          return jsonResponse(
+              400, json({{"success", false}, {"error", "Email and password are required."}}));
+        }
+
+        std::string email = body["email"].get<std::string>();
+        std::string masterPassword = body["master_password"].get<std::string>();
 
         AuthResult result = auth->loginUser(email, masterPassword);
         if (!result.success) {
-          return crow::response(401, json({{"error", result.message}}).dump());
+          return jsonResponse(401, json({{"error", result.message}}));
         }
 
         // Derive vault key using the user's stored vault salt
         SecureKey vaultKey = Encryption::deriveVaultKey(masterPassword, result.vault_salt);
         if (!vaultKey.isValid()) {
-          return crow::response(500, json({{"error", "Failed to derive vault encryption key."}}).dump());
+          auth->logoutUser(result.token);
+          return jsonResponse(500, json({{"error", "Failed to derive vault encryption key."}}));
         }
         SessionKeyStore::instance().storeKey(result.token, std::move(vaultKey));
 
-        json resp = {{"success", true},
-                     {"message", result.message},
-                     {"token", result.token},
-                     {"user",
-                      {{"id", result.user_id},
-                       {"name", result.name},
-                       {"email", result.email}}}};
-        return crow::response(200, resp.dump());
+        json resp = authenticatedUserResponse(result);
+        return jsonResponse(200, resp);
       });
 
   // POST /api/auth/logout
@@ -146,10 +254,8 @@ int main() {
           auth->logoutUser(token);
           SessionKeyStore::instance().removeKey(token);
         }
-        return crow::response(
-            200,
-            json({{"success", true}, {"message", "Logged out successfully."}})
-                .dump());
+        return jsonResponse(
+            200, json({{"success", true}, {"message", "Logged out successfully."}}));
       });
 
   // GET /api/auth/me
@@ -157,22 +263,20 @@ int main() {
       .methods(crow::HTTPMethod::Get)([&auth, &db](const crow::request &req) {
         auto sessionOpt = authenticateRequest(req, auth);
         if (!sessionOpt.has_value()) {
-          return crow::response(
-              401,
-              json({{"error", "Unauthorized or expired session."}}).dump());
+          return jsonResponse(
+              401, json({{"error", "Unauthorized or expired session."}}));
         }
 
         auto userOpt = db->getUserById(sessionOpt->user_id);
         if (!userOpt.has_value()) {
-          return crow::response(404,
-                                json({{"error", "User not found."}}).dump());
+          return jsonResponse(404, json({{"error", "User not found."}}));
         }
 
         json res = {{"id", userOpt->id},
                     {"name", userOpt->name},
                     {"email", userOpt->email},
                     {"created_at", userOpt->created_at}};
-        return crow::response(200, res.dump());
+        return jsonResponse(200, res);
       });
 
   // ==========================================

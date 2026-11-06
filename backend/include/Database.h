@@ -17,6 +17,34 @@ struct UserRecord {
   std::string created_at;
 };
 
+enum class PendingSignupCreateStatus {
+  Created,
+  AlreadyRegistered,
+  AlreadyPending,
+  Error
+};
+
+enum class OtpResendStatus {
+  Updated,
+  NotFound,
+  Cooldown,
+  RateLimited,
+  Error
+};
+
+enum class OtpVerificationStatus {
+  Verified,
+  Invalid,
+  Expired,
+  TooManyAttempts,
+  Error
+};
+
+struct OtpVerificationResult {
+  OtpVerificationStatus status{OtpVerificationStatus::Error};
+  UserRecord user;
+};
+
 struct VaultEntryRecord {
   int64_t id{0};
   int64_t user_id{0};
@@ -68,6 +96,17 @@ public:
 
   std::optional<UserRecord> getUserByEmail(const std::string &email);
   std::optional<UserRecord> getUserById(int64_t id);
+
+  PendingSignupCreateStatus createPendingSignup(
+      const std::string &name, const std::string &email,
+      const std::string &passwordHash, const std::string &vaultSalt,
+      const std::string &otpHash, int64_t expiresAt, int64_t now);
+  OtpResendStatus refreshPendingSignupOtp(const std::string &email,
+                                          const std::string &otpHash,
+                                          int64_t expiresAt, int64_t now);
+  OtpVerificationResult verifyPendingSignupOtp(
+      const std::string &email, const std::string &otpHash, int64_t now,
+      const std::string &masterPassword);
 
   // Vault operations (Prepared Statements)
   int64_t createVaultEntry(const VaultEntryRecord &entry);

@@ -84,11 +84,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleLogout = async () => {
-    await logout();
-    navigate('/');
-  };
-
   const showNotification = (msg) => {
     setSuccessMsg(msg);
     setTimeout(() => setSuccessMsg(''), 3000);
@@ -234,12 +229,6 @@ export default function Dashboard() {
             >
               <Plus className="w-5 h-5" />
               Add Credential
-            </button>
-            <button
-              onClick={handleLogout}
-              className="bg-gray-800 hover:bg-red-900/50 hover:text-red-400 border border-gray-700 transition text-gray-300 px-4 py-2.5 rounded-lg font-medium"
-            >
-              Logout
             </button>
           </div>
         </div>

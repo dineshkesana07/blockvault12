@@ -63,12 +63,22 @@ api.interceptors.response.use(
 
 // Authentication API methods
 export const authAPI = {
-  register: (name, email, masterPassword) =>
-    api.post(resolveApiPath('/api/auth/register'), {
+  signup: (name, email, masterPassword) =>
+    api.post(resolveApiPath('/api/auth/signup'), {
       name,
       email,
       master_password: masterPassword,
     }),
+
+  verifyOtp: (email, otp, masterPassword) =>
+    api.post(resolveApiPath('/api/auth/verify-otp'), {
+      email,
+      otp,
+      master_password: masterPassword,
+    }),
+
+  resendOtp: (email) =>
+    api.post(resolveApiPath('/api/auth/resend-otp'), { email }),
 
   login: (email, masterPassword) =>
     api.post(resolveApiPath('/api/auth/login'), {

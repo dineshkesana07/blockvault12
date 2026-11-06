@@ -1,11 +1,15 @@
 #include "Auth.h"
 #include "Encryption.h"
+#include "OtpEmail.h"
 #include <sodium.h>
 #include <regex>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
 #include <cctype>
+#include <cstdlib>
+#include <ctime>
+#include <algorithm>
 
 namespace {
     // Ensures sodium_init() is called safely once across the program
@@ -17,6 +21,74 @@ namespace {
         }
     };
     static SodiumInitializer g_sodiumInit;
+
+    struct SensitiveStringWiper {
+        std::string& value;
+        ~SensitiveStringWiper() {
+            Encryption::wipeString(value);
+        }
+    };
+
+    std::string normalizeEmail(const std::string& email) {
+        std::string normalized = email;
+        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+            [](unsigned char character) {
+                return static_cast<char>(std::tolower(character));
+            });
+        return normalized;
+    }
+
+    std::string trimWhitespace(const std::string& value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return {};
+        const auto last = value.find_last_not_of(" \t\r\n");
+        return value.substr(first, last - first + 1);
+    }
+
+    bool getOtpHash(const std::string& email, const std::string& otp,
+                    std::string& hash) {
+        const char* configuredSecret = std::getenv("OTP_HASH_SECRET");
+        if (!configuredSecret || std::char_traits<char>::length(configuredSecret) < 32) {
+            return false;
+        }
+
+        unsigned char key[crypto_generichash_KEYBYTES];
+        unsigned char digest[crypto_generichash_BYTES];
+        const size_t secretLength = std::char_traits<char>::length(configuredSecret);
+        if (crypto_generichash(key, sizeof(key),
+                reinterpret_cast<const unsigned char*>(configuredSecret),
+                secretLength, nullptr, 0) != 0) {
+            sodium_memzero(key, sizeof(key));
+            return false;
+        }
+
+        std::string input = email + '\0' + otp;
+        const int result = crypto_generichash(
+            digest, sizeof(digest),
+            reinterpret_cast<const unsigned char*>(input.data()), input.size(),
+            key, sizeof(key));
+        Encryption::wipeString(input);
+        sodium_memzero(key, sizeof(key));
+        if (result != 0) {
+            sodium_memzero(digest, sizeof(digest));
+            return false;
+        }
+
+        hash = Encryption::toHex(digest, sizeof(digest));
+        sodium_memzero(digest, sizeof(digest));
+        return !hash.empty();
+    }
+
+    std::string generateOtp() {
+        const unsigned int code = randombytes_uniform(1000000);
+        std::ostringstream stream;
+        stream << std::setw(6) << std::setfill('0') << code;
+        return stream.str();
+    }
+
+    int64_t currentTimestamp() {
+        return static_cast<int64_t>(std::time(nullptr));
+    }
 }
 
 Auth::Auth(std::shared_ptr<Database> db, int sessionDurationHours)
@@ -143,86 +215,242 @@ void Auth::purgeExpiredSessions() {
     }
 }
 
-AuthResult Auth::registerUser(const std::string& name, const std::string& email, const std::string& masterPassword) {
-    AuthResult res;
+OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
+                                      const std::string& submittedEmail,
+                                      const std::string& masterPassword) {
+    OtpFlowResult result;
+    const std::string name = trimWhitespace(submittedName);
+    const std::string email = normalizeEmail(submittedEmail);
 
-    // 1. Validate name
-    if (name.empty() || name.length() > 100) {
-        res.message = "Name must be between 1 and 100 characters.";
-        return res;
+    if (name.empty() || name.size() > 100) {
+        result.status = OtpFlowStatus::Invalid;
+        result.message = "Name must be between 1 and 100 characters.";
+        return result;
     }
-
-    // 2. Validate email syntax
     if (!isValidEmail(email)) {
-        res.message = "Invalid email format.";
-        return res;
+        result.status = OtpFlowStatus::Invalid;
+        result.message = "Invalid email format.";
+        return result;
     }
-
-    // 3. Validate master password complexity
-    std::string reason;
-    if (!isValidPassword(masterPassword, reason)) {
-        res.message = reason;
-        return res;
+    std::string passwordReason;
+    if (!isValidPassword(masterPassword, passwordReason)) {
+        result.status = OtpFlowStatus::Invalid;
+        result.message = passwordReason;
+        return result;
     }
-
-    // 4. Duplicate email check
     if (!m_db) {
-        res.message = "Database is not connected.";
-        return res;
+        result.status = OtpFlowStatus::Error;
+        result.message = "Database is not connected.";
+        return result;
+    }
+    if (!OtpEmail::isConfigured()) {
+        result.status = OtpFlowStatus::ConfigurationError;
+        result.message = "Email verification is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM_EMAIL on the backend.";
+        return result;
     }
 
-    auto existingUser = m_db->getUserByEmail(email);
+    std::string otpHash;
+    if (!getOtpHash(email, "configuration-check", otpHash)) {
+        result.status = OtpFlowStatus::ConfigurationError;
+        result.message = "Email verification is not configured. Set OTP_HASH_SECRET to a secret value of at least 32 characters on the backend.";
+        return result;
+    }
+
+    const auto existingUser = m_db->getUserByEmail(email);
     if (existingUser.has_value()) {
-        res.message = "An account with this email already exists.";
-        return res;
+        result.status = OtpFlowStatus::Accepted;
+        result.message = "If this email can be registered, a verification code has been sent.";
+        result.retry_after_seconds = 60;
+        return result;
     }
 
-    // 5. Generate a cryptographically secure random 16-byte salt for this user
-    std::string vaultSalt = Encryption::generateSaltHex();
-    if (vaultSalt.empty()) {
-        res.message = "Cryptographic error while generating vault salt.";
-        return res;
+    const std::string vaultSalt = Encryption::generateSaltHex();
+    const std::string passwordHash = hashPassword(masterPassword);
+    if (vaultSalt.empty() || passwordHash.empty()) {
+        result.status = OtpFlowStatus::Error;
+        result.message = "Could not securely prepare the registration. Please try again.";
+        return result;
     }
 
-    // 6. Hash master password using libsodium Argon2id
-    std::string passwordHash = hashPassword(masterPassword);
-    if (passwordHash.empty()) {
-        res.message = "Internal cryptographic error while securing master password.";
-        return res;
+    std::string otp = generateOtp();
+    SensitiveStringWiper otpWiper{otp};
+    if (!getOtpHash(email, otp, otpHash)) {
+        result.status = OtpFlowStatus::Error;
+        result.message = "Could not securely prepare email verification.";
+        return result;
     }
 
-    // 7. Persist user into database with their unique vault_salt
-    int64_t newUserId = m_db->createUser(name, email, passwordHash, vaultSalt);
-    if (newUserId <= 0) {
-        res.message = "Failed to create user account in database.";
-        return res;
+    const int64_t now = currentTimestamp();
+    const PendingSignupCreateStatus createStatus = m_db->createPendingSignup(
+        name, email, passwordHash, vaultSalt, otpHash, now + 300, now);
+    if (createStatus == PendingSignupCreateStatus::Error) {
+        result.status = OtpFlowStatus::Error;
+        result.message = "Could not start registration. Please try again.";
+        return result;
     }
 
-    // 8. Generate session token for immediate login
-    std::string token = generateSecureToken();
+    result.status = OtpFlowStatus::Accepted;
+    result.message = "If this email can be registered, a verification code has been sent.";
+    result.retry_after_seconds = 60;
+    if (createStatus != PendingSignupCreateStatus::Created) {
+        return result;
+    }
 
+    const bool sent = OtpEmail::sendVerificationCode(email, name, otp);
+    if (!sent) {
+        result.status = OtpFlowStatus::EmailError;
+        result.message = "We could not send the verification email. Please try again later.";
+        result.retry_after_seconds = 60;
+    }
+    return result;
+}
+
+OtpFlowResult Auth::resendRegistrationOtp(const std::string& submittedEmail) {
+    OtpFlowResult result;
+    const std::string email = normalizeEmail(submittedEmail);
+    if (!isValidEmail(email)) {
+        result.status = OtpFlowStatus::Invalid;
+        result.message = "Enter a valid email address.";
+        return result;
+    }
+    if (!m_db) {
+        result.status = OtpFlowStatus::Error;
+        result.message = "Database is not connected.";
+        return result;
+    }
+    if (!OtpEmail::isConfigured()) {
+        result.status = OtpFlowStatus::ConfigurationError;
+        result.message = "Email verification is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM_EMAIL on the backend.";
+        return result;
+    }
+
+    std::string otp = generateOtp();
+    SensitiveStringWiper otpWiper{otp};
+    std::string otpHash;
+    if (!getOtpHash(email, otp, otpHash)) {
+        result.status = OtpFlowStatus::ConfigurationError;
+        result.message = "Email verification is not configured. Set OTP_HASH_SECRET to a secret value of at least 32 characters on the backend.";
+        return result;
+    }
+
+    const int64_t now = currentTimestamp();
+    switch (m_db->refreshPendingSignupOtp(email, otpHash, now + 300, now)) {
+    case OtpResendStatus::NotFound:
+      result.status = OtpFlowStatus::Invalid;
+      result.message = "This verification request is unavailable. Start signup again.";
+      return result;
+    case OtpResendStatus::Cooldown:
+      result.status = OtpFlowStatus::Cooldown;
+      result.message = "Please wait before requesting another code.";
+      result.retry_after_seconds = 60;
+      return result;
+    case OtpResendStatus::RateLimited:
+      result.status = OtpFlowStatus::RateLimited;
+      result.message = "Too many verification emails were requested. Try again later.";
+      result.retry_after_seconds = 3600;
+      return result;
+    case OtpResendStatus::Error:
+      result.status = OtpFlowStatus::Error;
+      result.message = "Could not resend the verification code. Please try again.";
+      return result;
+    case OtpResendStatus::Updated:
+      break;
+    }
+
+    const bool sent = OtpEmail::sendVerificationCode(email, "there", otp);
+    if (!sent) {
+        result.status = OtpFlowStatus::EmailError;
+        result.message = "We could not send the verification email. Please try again later.";
+        return result;
+    }
+    result.status = OtpFlowStatus::Accepted;
+    result.message = "If this email can be registered, a verification code has been sent.";
+    result.retry_after_seconds = 60;
+    return result;
+}
+
+OtpFlowResult Auth::verifyRegistrationOtp(const std::string& submittedEmail,
+                                          const std::string& otp,
+                                          const std::string& masterPassword) {
+    OtpFlowResult result;
+    const std::string email = normalizeEmail(submittedEmail);
+    if (!isValidEmail(email)) {
+        result.status = OtpFlowStatus::Invalid;
+        result.message = "The verification code is invalid or expired.";
+        return result;
+    }
+    if (masterPassword.empty() || masterPassword.size() > 1024) {
+        result.status = OtpFlowStatus::Invalid;
+        result.message = "The verification code or password is invalid.";
+        return result;
+    }
+    if (!m_db) {
+        result.status = OtpFlowStatus::Error;
+        result.message = "Database is not connected.";
+        return result;
+    }
+
+    std::string otpHash;
+    const std::string candidateOtp = otp.size() == 6 ? otp : "invalid";
+    if (!getOtpHash(email, candidateOtp, otpHash)) {
+        result.status = OtpFlowStatus::ConfigurationError;
+        result.message = "Email verification is not configured. Set OTP_HASH_SECRET to a secret value of at least 32 characters on the backend.";
+        return result;
+    }
+
+    OtpVerificationResult verification = m_db->verifyPendingSignupOtp(
+        email, otpHash, currentTimestamp(), masterPassword);
+    switch (verification.status) {
+    case OtpVerificationStatus::Invalid:
+      result.status = OtpFlowStatus::Invalid;
+      result.message = "The verification code is invalid.";
+      return result;
+    case OtpVerificationStatus::Expired:
+      result.status = OtpFlowStatus::Expired;
+      result.message = "The verification code has expired. Request a new code.";
+      return result;
+    case OtpVerificationStatus::TooManyAttempts:
+      result.status = OtpFlowStatus::TooManyAttempts;
+      result.message = "Too many incorrect attempts. Request a new code.";
+      return result;
+    case OtpVerificationStatus::Error:
+      result.status = OtpFlowStatus::Error;
+      result.message = "Could not verify the code. Please try again.";
+      return result;
+    case OtpVerificationStatus::Verified:
+      return createSessionForUser(verification.user, "Email verified.");
+    }
+
+    return result;
+}
+
+OtpFlowResult Auth::createSessionForUser(const UserRecord& user,
+                                         const std::string& message) {
+    OtpFlowResult result;
+    const std::string token = generateSecureToken();
     {
         std::lock_guard<std::mutex> lock(m_sessionMutex);
         purgeExpiredSessions();
-
         SessionInfo session;
-        session.user_id = newUserId;
-        session.email = email;
+        session.user_id = user.id;
+        session.email = user.email;
         session.token = token;
-        session.expires_at = std::chrono::steady_clock::now() + std::chrono::hours(m_sessionDurationHours);
-
+        session.expires_at =
+            std::chrono::steady_clock::now() +
+            std::chrono::hours(m_sessionDurationHours);
         m_sessions[token] = session;
     }
 
-    res.success = true;
-    res.message = "Registration successful.";
-    res.token = token;
-    res.user_id = newUserId;
-    res.name = name;
-    res.email = email;
-    res.vault_salt = vaultSalt;
-
-    return res;
+    result.status = OtpFlowStatus::Accepted;
+    result.message = message;
+    result.auth.success = true;
+    result.auth.message = message;
+    result.auth.token = token;
+    result.auth.user_id = user.id;
+    result.auth.name = user.name;
+    result.auth.email = user.email;
+    result.auth.vault_salt = user.vault_salt;
+    return result;
 }
 
 AuthResult Auth::loginUser(const std::string& email, const std::string& masterPassword) {
@@ -233,7 +461,7 @@ AuthResult Auth::loginUser(const std::string& email, const std::string& masterPa
         return res;
     }
 
-    if (masterPassword.empty()) {
+    if (masterPassword.empty() || masterPassword.size() > 1024) {
         res.message = "Invalid email or master password.";
         return res;
     }

@@ -52,14 +52,37 @@ else()
     set(SODIUM_TARGET PkgConfig::SODIUM)
 endif()
 
-# 4. Asio standalone include path
+# 4. libcurl for authenticated SMTP delivery
+if(WIN32)
+    FetchContent_Declare(
+        curl
+        URL https://curl.se/download/curl-8.12.1.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+    set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)
+    set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_LIBPSL OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_LIBSSH2 OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_LIBSSH OFF CACHE BOOL "" FORCE)
+    set(CURL_USE_LIBIDN2 OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(curl)
+else()
+    find_package(CURL REQUIRED)
+endif()
+
+# 5. Asio standalone include path
 set(ASIO_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/asio-asio-1-30-2/asio/include")
 
-# 5. Backend Executable (Crow REST API Server)
+# 6. Backend Executable (Crow REST API Server)
 add_executable(blockvault_server
     src/main.cpp
     src/Database.cpp
     src/Auth.cpp
+    src/OtpEmail.cpp
     src/Encryption.cpp
     src/Vault.cpp
     src/Middleware.cpp
@@ -83,6 +106,7 @@ if(WIN32)
     target_link_libraries(blockvault_server PRIVATE
         sqlite3_lib
         ${SODIUM_TARGET}
+        CURL::libcurl
         ws2_32
         mswsock
     )
@@ -95,7 +119,28 @@ else()
     target_link_libraries(blockvault_server PRIVATE
         sqlite3_lib
         ${SODIUM_TARGET}
+        CURL::libcurl
         pthread
         dl
     )
 endif()
+
+enable_testing()
+add_executable(blockvault_otp_database_tests
+    tests/OtpDatabaseTests.cpp
+    src/Database.cpp
+    src/Auth.cpp
+    src/OtpEmail.cpp
+    src/Encryption.cpp
+)
+target_include_directories(blockvault_otp_database_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${sqlite3_SOURCE_DIR}
+    ${SODIUM_INCLUDE_DIRS}
+)
+target_link_libraries(blockvault_otp_database_tests PRIVATE
+    sqlite3_lib
+    ${SODIUM_TARGET}
+    CURL::libcurl
+)
+add_test(NAME otp_database_flow COMMAND blockvault_otp_database_tests)

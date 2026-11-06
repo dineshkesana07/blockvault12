@@ -16,11 +16,13 @@ backend/
 │   ├── Auth.h                  # User registration, login, token management
 │   ├── Database.h              # SQLite connection, migrations, prepared statements
 │   ├── Encryption.h            # Libsodium Argon2id & XChaCha20-Poly1305
+│   ├── OtpEmail.h              # TLS-protected SMTP verification email
 │   ├── Middleware.h            # CORS middleware & Bearer token authentication
 │   └── Vault.h                 # Password manager CRUD & search/filter operations
 └── src/                        # Implementations
     ├── Auth.cpp
     ├── Database.cpp
+    ├── OtpEmail.cpp
     ├── Encryption.cpp
     ├── Middleware.cpp
     ├── Vault.cpp
@@ -33,7 +35,8 @@ backend/
 
 ### Prerequisites
 1. **MinGW-W64 / GCC 14+ or Clang** with C++17 support.
-2. **CMake 3.15+** and **Ninja** (or `mingw32-make`).
+2. **CMake 3.15+** and **Ninja** (or `mingw32-make`). The Windows build
+   downloads libcurl using CMake FetchContent; allow CMake network access.
 
 ### Build Steps
 Open PowerShell in the `backend/` directory:
@@ -51,7 +54,18 @@ cmake --build build
 cd build
 .\blockvault_server.exe
 ```
-The server starts on: **`http://127.0.0.1:8080`**
+The server starts on: **`http://127.0.0.1:10000`** by default.
+
+### Email verification configuration
+
+Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
+`SMTP_FROM_EMAIL`, and a persistent random `OTP_HASH_SECRET` (at least 32
+characters) in the backend environment. Gmail uses `smtp.gmail.com`, port
+`587`, and an App Password. Never put these values in `VITE_` variables.
+OTP codes expire after five minutes, are limited to five guesses and five
+messages per hour per address, and can be resent once per 60 seconds. Existing
+SQLite user accounts remain active; only newly registered users need OTP
+verification.
 
 ---
 
@@ -62,7 +76,9 @@ The server starts on: **`http://127.0.0.1:8080`**
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
 | **GET** | `/api/health` | No | Server status & version check |
-| **POST** | `/api/auth/register` | No | Register new user with Argon2id master password |
+| **POST** | `/api/auth/signup` | No | Start registration and email a one-time code |
+| **POST** | `/api/auth/verify-otp` | No | Verify code and complete registration |
+| **POST** | `/api/auth/resend-otp` | No | Resend a code subject to cooldown/rate limits |
 | **POST** | `/api/auth/login` | No | Authenticate user & receive session token |
 | **POST** | `/api/auth/logout` | Yes (`Bearer`) | Revoke token and wipe memory keys |
 | **GET** | `/api/auth/me` | Yes (`Bearer`) | Retrieve current user profile |
@@ -77,9 +93,9 @@ The server starts on: **`http://127.0.0.1:8080`**
 
 ### Postman Examples & Expected Responses
 
-#### 1. Register User
+#### 1. Start Registration
 * **Method**: `POST`
-* **URL**: `http://127.0.0.1:8080/api/auth/register`
+* **URL**: `http://127.0.0.1:10000/api/auth/signup`
 * **Headers**: `Content-Type: application/json`
 * **Body** (Raw JSON):
 ```json
@@ -89,23 +105,32 @@ The server starts on: **`http://127.0.0.1:8080`**
   "master_password": "SecretP@ssw0rd!"
 }
 ```
-* **Expected Response (`201 Created`)**:
+* **Expected Response (`202 Accepted`)** (the code is sent by email and is never returned by the API):
 ```json
 {
-  "message": "Registration successful.",
+  "message": "If this email can be registered, a verification code has been sent.",
   "success": true,
-  "token": "4df0587386de328765474c0a1f3a9ca0a3d6e24743ecac978bc15d2d8d4839ea",
-  "user": {
-    "email": "maya@proton.me",
-    "id": 1,
-    "name": "Maya Rao"
-  }
+  "retry_after_seconds": 60
 }
 ```
 
-#### 2. Login User
+#### 2. Verify Email
 * **Method**: `POST`
-* **URL**: `http://127.0.0.1:8080/api/auth/login`
+* **URL**: `http://127.0.0.1:10000/api/auth/verify-otp`
+* **Body**:
+```json
+{
+  "email": "maya@proton.me",
+  "otp": "123456",
+  "master_password": "SecretP@ssw0rd!"
+}
+```
+* A successful response creates the account and opens its vault session. Resend
+  with `POST /api/auth/resend-otp` and `{"email":"maya@proton.me"}`.
+
+#### 3. Login User
+* **Method**: `POST`
+* **URL**: `http://127.0.0.1:10000/api/auth/login`
 * **Body**:
 ```json
 {
@@ -127,9 +152,9 @@ The server starts on: **`http://127.0.0.1:8080`**
 }
 ```
 
-#### 3. Add Credential (Encrypted at Rest)
+#### 4. Add Credential (Encrypted at Rest)
 * **Method**: `POST`
-* **URL**: `http://127.0.0.1:8080/api/vault`
+* **URL**: `http://127.0.0.1:10000/api/vault`
 * **Headers**:
   * `Content-Type: application/json`
   * `Authorization: Bearer <TOKEN>`
@@ -154,9 +179,9 @@ The server starts on: **`http://127.0.0.1:8080`**
 }
 ```
 
-#### 4. Get Decrypted Vault Credentials
+#### 5. Get Decrypted Vault Credentials
 * **Method**: `GET`
-* **URL**: `http://127.0.0.1:8080/api/vault`
+* **URL**: `http://127.0.0.1:10000/api/vault`
 * **Headers**: `Authorization: Bearer <TOKEN>`
 * **Expected Response (`200 OK`)**:
 ```json
@@ -179,12 +204,12 @@ The server starts on: **`http://127.0.0.1:8080`**
 ```
 
 #### 5. Search & Filter
-* By category: `GET http://127.0.0.1:8080/api/vault?category=Development`
-* By search query: `GET http://127.0.0.1:8080/api/vault?search=git`
+* By category: `GET http://127.0.0.1:10000/api/vault?category=Development`
+* By search query: `GET http://127.0.0.1:10000/api/vault?search=git`
 
 #### 6. Logout & Session Invalidation
 * **Method**: `POST`
-* **URL**: `http://127.0.0.1:8080/api/auth/logout`
+* **URL**: `http://127.0.0.1:10000/api/auth/logout`
 * **Headers**: `Authorization: Bearer <TOKEN>`
 * **Expected Response (`200 OK`)**:
 ```json
@@ -199,4 +224,3 @@ The server starts on: **`http://127.0.0.1:8080`**
   "error": "Unauthorized or expired session."
 }
 ```
-

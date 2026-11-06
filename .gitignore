@@ -24,7 +24,8 @@ backend/database/*.db
 .env.*.local
 
 # IDE / Editor
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .idea/
 *.swp
 *.swo

@@ -3,9 +3,26 @@
 #include <sodium.h>
 #include <cstdlib>
 #include <cstring>
+#include <regex>
 #include <string>
 
 namespace {
+bool isSafeHeaderValue(const std::string &value) {
+  return !value.empty() && value.find_first_of("\r\n\0") == std::string::npos;
+}
+
+bool isValidSmtpRecipient(const std::string &email) {
+  if (email.empty() || email.size() > 254) {
+    return false;
+  }
+  if (email.find_first_of("\r\n\0") != std::string::npos) {
+    return false;
+  }
+  static const std::regex emailPattern(
+      R"(^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+$)");
+  return std::regex_match(email, emailPattern);
+}
+
 struct SmtpConfig {
   std::string host;
   std::string username;
@@ -34,8 +51,12 @@ bool readConfig(SmtpConfig &config) {
   const std::string port = getEnvironmentValue("SMTP_PORT");
   if (config.host.empty() || config.username.empty() ||
       config.password.empty() || config.fromEmail.empty() || port.empty() ||
-      config.host.find_first_of("\r\n/") != std::string::npos ||
-      config.fromEmail.find_first_of("\r\n<>") != std::string::npos) {
+      !isSafeHeaderValue(config.host) ||
+      !isSafeHeaderValue(config.username) ||
+      !isSafeHeaderValue(config.password) ||
+      !isSafeHeaderValue(config.fromEmail) ||
+      config.host.find('/') != std::string::npos ||
+      config.fromEmail.find_first_of("<>") != std::string::npos) {
     return false;
   }
 
@@ -106,6 +127,12 @@ bool OtpEmail::isConfigured() {
 bool OtpEmail::sendVerificationCode(const std::string &email,
                                     const std::string &name,
                                     const std::string &otp) {
+  if (!isValidSmtpRecipient(email) || otp.empty() ||
+      otp.find_first_not_of("0123456789") != std::string::npos ||
+      name.find_first_of("\r\n\0") != std::string::npos) {
+    return false;
+  }
+
   SmtpConfig config;
   if (!readConfig(config)) {
     return false;

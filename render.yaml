@@ -22,9 +22,9 @@ services:
         value: "0.0.0.0"
       - key: FRONTEND_ORIGIN
         sync: false
-      - key: RESEND_API_KEY
+      - key: EMAIL_SERVICE_URL
         sync: false
-      - key: OTP_FROM_EMAIL
+      - key: EMAIL_SERVICE_TOKEN
         sync: false
       - key: OTP_HASH_SECRET
         generateValue: true

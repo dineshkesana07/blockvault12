@@ -16,7 +16,7 @@ backend/
 │   ├── Auth.h                  # User registration, login, token management
 │   ├── Database.h              # SQLite connection, migrations, prepared statements
 │   ├── Encryption.h            # Libsodium Argon2id & XChaCha20-Poly1305
-│   ├── OtpEmail.h              # HTTPS Resend verification email
+│   ├── OtpEmail.h              # HTTPS Google Apps Script verification email
 │   ├── Middleware.h            # CORS middleware & Bearer token authentication
 │   └── Vault.h                 # Password manager CRUD & search/filter operations
 └── src/                        # Implementations
@@ -58,27 +58,30 @@ The server starts on: **`http://127.0.0.1:10000`** by default.
 
 ### Email verification configuration
 
-Set `RESEND_API_KEY`, `OTP_FROM_EMAIL`, and a persistent random
+Set `EMAIL_SERVICE_URL`, `EMAIL_SERVICE_TOKEN`, and a persistent random
 `OTP_HASH_SECRET` (at least 32 characters) in the backend environment.
-`OTP_FROM_EMAIL` must be a sender address verified in Resend. For local
-development, the server loads an optional `.env` from the current directory or
-its backend parent; when starting from `backend/build`, put the file at
-`backend/.env`. Values already set in the process environment take precedence.
-For Render, add `RESEND_API_KEY` and `OTP_FROM_EMAIL` under the service's
-Environment settings; the container does not include or load the repository
-`.env` file. Keep `RESEND_API_KEY` on the backend only; never put it in `VITE_`
-variables or frontend configuration. The backend sends email through Resend's
-HTTPS API with certificate verification and bounded timeouts.
+`EMAIL_SERVICE_URL` must be the deployed Google Apps Script web app URL using
+the `/macros/s/<deployment-id>/exec` path. The endpoint must accept a JSON POST
+with `token`, `email`, and `otp`, then return JSON containing `{"success":true}`
+only after `MailApp.sendEmail` succeeds. For local development, the server loads
+an optional `.env` from the current directory or its backend parent; when
+starting from `backend/build`, put the file at `backend/.env`. Values already
+set in the process environment take precedence. For Render, add
+`EMAIL_SERVICE_URL` and `EMAIL_SERVICE_TOKEN` under the service's Environment
+settings; the container does not include or load the repository `.env` file.
+Keep `EMAIL_SERVICE_TOKEN` on the backend and Apps Script only; never put it in
+`VITE_` variables or frontend configuration. The backend sends HTTPS requests
+with certificate verification, redirect following, and bounded timeouts.
 OTP codes expire after five minutes, are limited to five guesses and five
 messages per hour per address, and can be resent once per 60 seconds. Existing
 SQLite user accounts remain active; only newly registered users need OTP
-verification. An OTP remains unusable until Resend accepts the request and its
+verification. An OTP remains unusable until Apps Script reports success and its
 delivery status is saved; failed sends remain pending but can only be retried
 through the existing resend cooldown and rate limits.
 
-Resend API failures are categorized in backend logs without logging credentials,
-addresses, message content, or OTP values. Resend accepting a request means it
-accepted the message for processing; it does not guarantee delivery to the
+Email service failures are categorized in backend logs without logging service
+tokens, addresses, message content, or OTP values. Apps Script success means
+MailApp accepted the message for sending; it does not guarantee delivery to the
 recipient's inbox.
 
 ---

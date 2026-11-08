@@ -10,16 +10,16 @@
 namespace {
 using json = nlohmann::json;
 
-constexpr char kResendUrl[] = "https://api.resend.com/emails";
-constexpr size_t kMaxResponseBytes = 64 * 1024;
+constexpr size_t kMaxResponseBytes = 16 * 1024;
+constexpr char kGoogleAppsScriptHost[] = "script.google.com";
 
-struct ResendConfig {
-  std::string apiKey;
-  std::string fromEmail;
+struct EmailServiceConfig {
+  std::string url;
+  std::string token;
 
-  ~ResendConfig() {
-    if (!apiKey.empty()) {
-      sodium_memzero(apiKey.data(), apiKey.size());
+  ~EmailServiceConfig() {
+    if (!token.empty()) {
+      sodium_memzero(token.data(), token.size());
     }
   }
 };
@@ -28,6 +28,12 @@ struct ResponseBuffer {
   std::string body;
   bool exceededLimit{false};
 };
+
+bool initializeCurl() {
+  static const bool initialized =
+      curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+  return initialized;
+}
 
 std::string getEnvironmentValue(const char *name) {
   const char *value = std::getenv(name);
@@ -45,48 +51,54 @@ bool isValidEmailAddress(const std::string &email) {
   return std::regex_match(email, emailPattern);
 }
 
-bool readConfig(ResendConfig &config) {
-  config.apiKey = getEnvironmentValue("RESEND_API_KEY");
-  config.fromEmail = getEnvironmentValue("OTP_FROM_EMAIL");
-  if (config.apiKey.empty() || config.apiKey.find_first_of("\r\n") !=
-                                   std::string::npos ||
-      config.apiKey.find('\0') != std::string::npos ||
-      !isValidEmailAddress(config.fromEmail)) {
-    std::cerr << "[OTP email] Resend configuration is missing or invalid; "
-                 "check RESEND_API_KEY and OTP_FROM_EMAIL. Values are not "
-                 "logged."
+bool isGoogleAppsScriptUrl(const std::string &url) {
+  CURLU *parsedUrl = curl_url();
+  if (!parsedUrl) {
+    return false;
+  }
+
+  const CURLUcode parseResult =
+      curl_url_set(parsedUrl, CURLUPART_URL, url.c_str(), CURLU_DISALLOW_USER);
+  char *scheme = nullptr;
+  char *host = nullptr;
+  char *path = nullptr;
+  const bool valid =
+      parseResult == CURLUE_OK &&
+      curl_url_get(parsedUrl, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK &&
+      curl_url_get(parsedUrl, CURLUPART_HOST, &host, 0) == CURLUE_OK &&
+      curl_url_get(parsedUrl, CURLUPART_PATH, &path, 0) == CURLUE_OK &&
+      std::string(scheme) == "https" &&
+      std::string(host) == kGoogleAppsScriptHost &&
+      std::string(path).rfind("/macros/s/", 0) == 0 &&
+      std::string(path).size() > std::string("/macros/s/").size() + 5 &&
+      std::string(path).compare(std::string(path).size() - 5, 5, "/exec") ==
+          0;
+  curl_free(scheme);
+  curl_free(host);
+  curl_free(path);
+  curl_url_cleanup(parsedUrl);
+  return valid;
+}
+
+bool readConfig(EmailServiceConfig &config) {
+  if (!initializeCurl()) {
+    std::cerr << "[OTP email] libcurl global initialization failed."
+              << std::endl;
+    return false;
+  }
+  config.url = getEnvironmentValue("EMAIL_SERVICE_URL");
+  config.token = getEnvironmentValue("EMAIL_SERVICE_TOKEN");
+  if (config.token.empty() ||
+      config.token.find_first_of("\r\n") != std::string::npos ||
+      config.token.find('\0') != std::string::npos ||
+      !isGoogleAppsScriptUrl(config.url)) {
+    std::cerr << "[OTP email] Email service configuration is missing or "
+                 "invalid; check EMAIL_SERVICE_URL and EMAIL_SERVICE_TOKEN. "
+                 "Values are not logged."
               << std::endl;
     return false;
   }
   return true;
-}
-
-std::string escapeHtml(const std::string &value) {
-  std::string escaped;
-  escaped.reserve(value.size());
-  for (char character : value) {
-    switch (character) {
-    case '&':
-      escaped += "&amp;";
-      break;
-    case '<':
-      escaped += "&lt;";
-      break;
-    case '>':
-      escaped += "&gt;";
-      break;
-    case '"':
-      escaped += "&quot;";
-      break;
-    case '\'':
-      escaped += "&#39;";
-      break;
-    default:
-      escaped += character;
-      break;
-    }
-  }
-  return escaped;
 }
 
 size_t receiveResponse(char *data, size_t size, size_t count, void *userData) {
@@ -96,7 +108,8 @@ size_t receiveResponse(char *data, size_t size, size_t count, void *userData) {
     return 0;
   }
   const size_t bytes = size * count;
-  if (bytes > kMaxResponseBytes - response->body.size()) {
+  if (response->body.size() > kMaxResponseBytes ||
+      bytes > kMaxResponseBytes - response->body.size()) {
     response->exceededLimit = true;
     return 0;
   }
@@ -110,92 +123,36 @@ void wipeString(std::string &value) {
     value.clear();
   }
 }
-
-const char *httpFailureCategory(long status) {
-  switch (status) {
-  case 400:
-    return "Resend rejected the email request";
-  case 401:
-    return "Resend API key was rejected";
-  case 403:
-    return "Resend sender or account is not authorized";
-  case 429:
-    return "Resend rate limit was reached";
-  default:
-    return status >= 500 ? "Resend service error"
-                         : "Resend returned an unexpected HTTP status";
-  }
-}
 } // namespace
 
 bool OtpEmail::isConfigured() {
-  ResendConfig config;
+  EmailServiceConfig config;
   return readConfig(config);
 }
 
 bool OtpEmail::sendVerificationCode(const std::string &email,
-                                    const std::string &name,
                                     const std::string &otp) {
   if (!isValidEmailAddress(email) || otp.size() != 6 ||
-      otp.find_first_not_of("0123456789") != std::string::npos ||
-      name.find_first_of("\r\n") != std::string::npos ||
-      name.find('\0') != std::string::npos) {
+      otp.find_first_not_of("0123456789") != std::string::npos) {
     std::cerr << "[OTP email] Refusing to send due to invalid recipient or "
-                 "message fields."
+                 "verification code."
               << std::endl;
     return false;
   }
 
-  ResendConfig config;
+  EmailServiceConfig config;
   if (!readConfig(config)) {
     return false;
   }
 
-  static const bool curlInitialized =
-      curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
-  if (!curlInitialized) {
+  if (!initializeCurl()) {
     std::cerr << "[OTP email] libcurl global initialization failed."
               << std::endl;
     return false;
   }
 
-  const std::string safeName = escapeHtml(name);
-  const std::string html =
-      "<!doctype html><html><body style=\"margin:0;background:#080d1a;"
-      "font-family:Arial,sans-serif;color:#f8fafc;padding:32px\">"
-      "<div style=\"max-width:520px;margin:auto;background:#101827;"
-      "border:1px solid #293449;border-radius:16px;padding:32px\">"
-      "<p style=\"color:#22d3ee;font-weight:bold;letter-spacing:2px\">"
-      "BLOCKVAULT</p><h1 style=\"font-size:24px\">Verify your email</h1>"
-      "<p>Hello " +
-      safeName +
-      ",</p><p>Use this one-time code to finish creating your BlockVault "
-      "account:</p><div style=\"background:#080d1a;border-radius:12px;"
-      "padding:20px;text-align:center;font-size:32px;font-weight:bold;"
-      "letter-spacing:10px;color:#a78bfa\">" +
-      otp +
-      "</div><p>This code expires in <strong>5 minutes</strong> and can only "
-      "be used once.</p><p style=\"color:#fbbf24\"><strong>Security "
-      "reminder:</strong> Never share this code with anyone. BlockVault will "
-      "never ask you for it.</p><p style=\"color:#94a3b8;font-size:13px\">"
-      "If you did not request this code, you can safely ignore this "
-      "email.</p></div></body></html>";
-  std::string text =
-      "Hello " + name +
-      ",\n\nUse this one-time code to finish creating your BlockVault "
-      "account: " +
-      otp +
-      "\n\nThis code expires in 5 minutes and can only be used once. Never "
-      "share this code with anyone.\n";
   std::string requestBody =
-      json{{"from", config.fromEmail},
-           {"to", json::array({email})},
-           {"subject", "BlockVault Email Verification"},
-           {"html", html},
-           {"text", text}}
-          .dump();
-  wipeString(text);
-
+      json{{"token", config.token}, {"email", email}, {"otp", otp}}.dump();
   CURL *curl = curl_easy_init();
   if (!curl) {
     std::cerr << "[OTP email] Could not allocate a libcurl HTTP handle."
@@ -204,18 +161,8 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
     return false;
   }
 
-  curl_slist *headers = nullptr;
-  const std::string authorization = "Authorization: Bearer " + config.apiKey;
-  headers = curl_slist_append(headers, "Content-Type: application/json");
-  if (headers) {
-    curl_slist *updated = curl_slist_append(headers, authorization.c_str());
-    if (updated) {
-      headers = updated;
-    } else {
-      curl_slist_free_all(headers);
-      headers = nullptr;
-    }
-  }
+  curl_slist *headers =
+      curl_slist_append(nullptr, "Content-Type: application/json");
   if (!headers) {
     std::cerr << "[OTP email] Could not allocate HTTP request headers."
               << std::endl;
@@ -229,8 +176,12 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
     return curl_easy_setopt(curl, option, value) == CURLE_OK;
   };
   const bool optionsSet =
-      setOption(CURLOPT_URL, kResendUrl) &&
+      setOption(CURLOPT_URL, config.url.c_str()) &&
       setOption(CURLOPT_PROTOCOLS_STR, "https") &&
+      setOption(CURLOPT_REDIR_PROTOCOLS_STR, "https") &&
+      setOption(CURLOPT_FOLLOWLOCATION, 1L) &&
+      setOption(CURLOPT_MAXREDIRS, 5L) &&
+      setOption(CURLOPT_POSTREDIR, static_cast<long>(CURL_REDIR_POST_ALL)) &&
       setOption(CURLOPT_HTTPHEADER, headers) &&
       setOption(CURLOPT_POST, 1L) &&
       setOption(CURLOPT_POSTFIELDS, requestBody.data()) &&
@@ -241,50 +192,48 @@ bool OtpEmail::sendVerificationCode(const std::string &email,
       setOption(CURLOPT_SSL_VERIFYPEER, 1L) &&
       setOption(CURLOPT_SSL_VERIFYHOST, 2L) &&
       setOption(CURLOPT_CONNECTTIMEOUT, 10L) &&
-      setOption(CURLOPT_TIMEOUT, 20L) &&
+      setOption(CURLOPT_TIMEOUT, 25L) &&
       setOption(CURLOPT_NOSIGNAL, 1L);
 
   CURLcode result = CURLE_OK;
   long status = 0;
   if (!optionsSet) {
-    std::cerr << "[OTP email] Failed to configure a libcurl HTTP option."
+    std::cerr << "[OTP email] Failed to configure an HTTPS request option."
               << std::endl;
     result = CURLE_FAILED_INIT;
   } else {
     result = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
   }
+
   curl_slist_free_all(headers);
   curl_easy_cleanup(curl);
   wipeString(requestBody);
 
   if (result != CURLE_OK) {
-    std::cerr << "[OTP email] Resend HTTPS request failed (libcurl="
+    std::cerr << "[OTP email] Email service HTTPS request failed (libcurl="
               << static_cast<int>(result)
               << (response.exceededLimit ? ", response too large"
-                                         : ", no request details logged")
-              << "). No credentials, addresses, message content, or OTP "
-                 "values were logged."
+                                         : ", request details withheld")
+              << "). No service token, email address, or OTP was logged."
               << std::endl;
+    wipeString(response.body);
     return false;
   }
 
   const json responseJson = json::parse(response.body, nullptr, false);
-  const bool accepted = status >= 200 && status < 300 &&
-                        responseJson.is_object() &&
-                        responseJson.contains("id") &&
-                        responseJson["id"].is_string() &&
-                        !responseJson["id"].get_ref<const std::string &>().empty();
+  const bool accepted =
+      status >= 200 && status < 300 && responseJson.is_object() &&
+      responseJson.contains("success") &&
+      responseJson["success"].is_boolean() &&
+      responseJson["success"].get<bool>();
+  wipeString(response.body);
   if (!accepted) {
-    std::cerr << "[OTP email] "
-              << httpFailureCategory(status)
-              << " (HTTP " << status
-              << (responseJson.is_discarded() ? ", invalid JSON response"
-                                              : ", request not accepted")
-              << "). Response body and credentials were not logged."
+    std::cerr << "[OTP email] Email service did not confirm delivery "
+              << "(HTTP " << status << "). No response body or secret values "
+                 "were logged."
               << std::endl;
     return false;
   }
-
   return true;
 }

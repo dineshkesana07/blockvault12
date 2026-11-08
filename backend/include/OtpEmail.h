@@ -7,7 +7,6 @@ class OtpEmail {
 public:
   static bool isConfigured();
   static bool sendVerificationCode(const std::string &email,
-                                   const std::string &name,
                                    const std::string &otp);
 };
 

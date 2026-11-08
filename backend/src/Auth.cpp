@@ -245,7 +245,7 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
     }
     if (!OtpEmail::isConfigured()) {
         result.status = OtpFlowStatus::ConfigurationError;
-        result.message = "Email verification is not configured. Set RESEND_API_KEY and OTP_FROM_EMAIL on the backend.";
+        result.message = "Email verification is not configured. Set EMAIL_SERVICE_URL and EMAIL_SERVICE_TOKEN on the backend.";
         return result;
     }
 
@@ -308,7 +308,7 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
         return result;
     }
 
-    const bool sent = OtpEmail::sendVerificationCode(email, name, otp);
+    const bool sent = OtpEmail::sendVerificationCode(email, otp);
     if (!sent) {
         result.status = OtpFlowStatus::EmailError;
         result.message = "We could not send the verification email. Please try again later.";
@@ -341,7 +341,7 @@ OtpFlowResult Auth::resendRegistrationOtp(const std::string& submittedEmail) {
     }
     if (!OtpEmail::isConfigured()) {
         result.status = OtpFlowStatus::ConfigurationError;
-        result.message = "Email verification is not configured. Set RESEND_API_KEY and OTP_FROM_EMAIL on the backend.";
+        result.message = "Email verification is not configured. Set EMAIL_SERVICE_URL and EMAIL_SERVICE_TOKEN on the backend.";
         return result;
     }
 
@@ -381,7 +381,7 @@ OtpFlowResult Auth::resendRegistrationOtp(const std::string& submittedEmail) {
       break;
     }
 
-    const bool sent = OtpEmail::sendVerificationCode(email, "there", otp);
+    const bool sent = OtpEmail::sendVerificationCode(email, otp);
     if (!sent) {
         result.status = OtpFlowStatus::EmailError;
         result.message = "We could not send the verification email. Please try again later.";

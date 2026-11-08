@@ -60,10 +60,13 @@ The server starts on: **`http://127.0.0.1:10000`** by default.
 
 Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
 `SMTP_FROM_EMAIL`, and a persistent random `OTP_HASH_SECRET` (at least 32
-characters) in the backend environment. For Render, add these under the service's
-Environment settings; the container reads values provided by Render and does not
-load a repository `.env` file. Gmail uses `smtp.gmail.com`, port `587`, the full
-Gmail address as `SMTP_USERNAME`, and a Google App Password as `SMTP_PASSWORD`.
+characters) in the backend environment. For local development, the server loads
+an optional `.env` from the current directory or its backend parent; when starting
+from `backend/build`, put the file at `backend/.env`. Values already set in the
+process environment take precedence. For Render, add these under the service's
+Environment settings; the container does not include or load the repository
+`.env` file. Gmail uses `smtp.gmail.com`, port `587`, the full Gmail address as
+`SMTP_USERNAME`, and a Google App Password as `SMTP_PASSWORD`.
 `SMTP_FROM_EMAIL` must be that Gmail address or a verified Gmail "send mail as"
 alias. Port 587 uses required STARTTLS with certificate and hostname verification.
 Never put these values in `VITE_` variables.

@@ -4,14 +4,111 @@
 #include "Middleware.h"
 #include "Vault.h"
 #include "crow.h"
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <string>
 
 using json = nlohmann::json;
 
 namespace {
+std::string trimEnvironmentText(std::string value) {
+  const auto isWhitespace = [](unsigned char character) {
+    return std::isspace(character) != 0;
+  };
+  const auto first =
+      std::find_if_not(value.begin(), value.end(), isWhitespace);
+  const auto last =
+      std::find_if_not(value.rbegin(), value.rend(), isWhitespace).base();
+  return first < last ? std::string(first, last) : std::string{};
+}
+
+bool setEnvironmentValue(const std::string &key, const std::string &value) {
+#ifdef _WIN32
+  return _putenv_s(key.c_str(), value.c_str()) == 0;
+#else
+  return setenv(key.c_str(), value.c_str(), 0) == 0;
+#endif
+}
+
+void loadLocalEnvironment() {
+  const std::array<std::filesystem::path, 4> candidates = {
+      ".env", "../.env", "backend/.env", "../backend/.env"};
+  for (const auto &path : candidates) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) {
+      std::cerr << "[Config] Could not inspect local environment file."
+                << std::endl;
+      return;
+    }
+    if (!exists) {
+      continue;
+    }
+
+    std::ifstream file(path);
+    if (!file) {
+      std::cerr << "[Config] Could not open local environment file."
+                << std::endl;
+      return;
+    }
+
+    std::string line;
+    bool firstLine = true;
+    while (std::getline(file, line)) {
+      if (firstLine && line.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+        line.erase(0, 3);
+      }
+      firstLine = false;
+      line = trimEnvironmentText(std::move(line));
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
+
+      const auto separator = line.find('=');
+      if (separator == std::string::npos) {
+        continue;
+      }
+      const std::string key =
+          trimEnvironmentText(line.substr(0, separator));
+      if (key.empty() ||
+          !std::all_of(key.begin(), key.end(), [](unsigned char character) {
+            return std::isalnum(character) != 0 || character == '_';
+          }) ||
+          std::getenv(key.c_str()) != nullptr) {
+        continue;
+      }
+
+      std::string value = trimEnvironmentText(line.substr(separator + 1));
+      if (value.size() >= 2 &&
+          ((value.front() == '"' && value.back() == '"') ||
+           (value.front() == '\'' && value.back() == '\''))) {
+        value = value.substr(1, value.size() - 2);
+      } else {
+        const auto comment = value.find(" #");
+        if (comment != std::string::npos) {
+          value = trimEnvironmentText(value.substr(0, comment));
+        }
+      }
+      if (!value.empty() && !setEnvironmentValue(key, value)) {
+        std::cerr << "[Config] Could not load environment variable " << key
+                  << "." << std::endl;
+      }
+    }
+
+    if (file.bad()) {
+      std::cerr << "[Config] Error while reading local environment file."
+                << std::endl;
+    }
+    return;
+  }
+}
+
 crow::response jsonResponse(int status, const json &body) {
   crow::response response(status, body.dump());
   response.set_header("Content-Type", "application/json; charset=utf-8");
@@ -62,6 +159,8 @@ json authenticatedUserResponse(const AuthResult &result) {
 } // namespace
 
 int main() {
+  loadLocalEnvironment();
+
   std::cout << "========================================" << std::endl;
   std::cout << "   BLOCKVAULT C++ Backend Server Starting" << std::endl;
   std::cout << "========================================" << std::endl;

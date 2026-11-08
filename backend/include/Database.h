@@ -104,6 +104,9 @@ public:
   OtpResendStatus refreshPendingSignupOtp(const std::string &email,
                                           const std::string &otpHash,
                                           int64_t expiresAt, int64_t now);
+  bool isPendingSignupOtpDeliveryConfirmed(const std::string &email);
+  bool confirmPendingSignupOtpDelivery(const std::string &email,
+                                       const std::string &otpHash);
   OtpVerificationResult verifyPendingSignupOtp(
       const std::string &email, const std::string &otpHash, int64_t now,
       const std::string &masterPassword);

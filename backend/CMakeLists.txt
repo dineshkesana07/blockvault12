@@ -53,7 +53,7 @@ else()
     set(SODIUM_TARGET PkgConfig::SODIUM)
 endif()
 
-# 4. libcurl for authenticated SMTP delivery
+# 4. libcurl for Resend HTTPS email delivery
 if(WIN32)
     FetchContent_Declare(
         curl
@@ -138,6 +138,7 @@ target_include_directories(blockvault_otp_database_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${sqlite3_SOURCE_DIR}
     ${SODIUM_INCLUDE_DIRS}
+    ${json_SOURCE_DIR}/include
 )
 target_link_libraries(blockvault_otp_database_tests PRIVATE
     sqlite3_lib

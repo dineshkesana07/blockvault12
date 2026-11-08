@@ -16,7 +16,7 @@ backend/
 │   ├── Auth.h                  # User registration, login, token management
 │   ├── Database.h              # SQLite connection, migrations, prepared statements
 │   ├── Encryption.h            # Libsodium Argon2id & XChaCha20-Poly1305
-│   ├── OtpEmail.h              # TLS-protected SMTP verification email
+│   ├── OtpEmail.h              # HTTPS Resend verification email
 │   ├── Middleware.h            # CORS middleware & Bearer token authentication
 │   └── Vault.h                 # Password manager CRUD & search/filter operations
 └── src/                        # Implementations
@@ -58,27 +58,28 @@ The server starts on: **`http://127.0.0.1:10000`** by default.
 
 ### Email verification configuration
 
-Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`,
-`SMTP_FROM_EMAIL`, and a persistent random `OTP_HASH_SECRET` (at least 32
-characters) in the backend environment. For local development, the server loads
-an optional `.env` from the current directory or its backend parent; when starting
-from `backend/build`, put the file at `backend/.env`. Values already set in the
-process environment take precedence. For Render, add these under the service's
+Set `RESEND_API_KEY`, `OTP_FROM_EMAIL`, and a persistent random
+`OTP_HASH_SECRET` (at least 32 characters) in the backend environment.
+`OTP_FROM_EMAIL` must be a sender address verified in Resend. For local
+development, the server loads an optional `.env` from the current directory or
+its backend parent; when starting from `backend/build`, put the file at
+`backend/.env`. Values already set in the process environment take precedence.
+For Render, add `RESEND_API_KEY` and `OTP_FROM_EMAIL` under the service's
 Environment settings; the container does not include or load the repository
-`.env` file. Gmail uses `smtp.gmail.com`, port `587`, the full Gmail address as
-`SMTP_USERNAME`, and a Google App Password as `SMTP_PASSWORD`.
-`SMTP_FROM_EMAIL` must be that Gmail address or a verified Gmail "send mail as"
-alias. Port 587 uses required STARTTLS with certificate and hostname verification.
-Never put these values in `VITE_` variables.
+`.env` file. Keep `RESEND_API_KEY` on the backend only; never put it in `VITE_`
+variables or frontend configuration. The backend sends email through Resend's
+HTTPS API with certificate verification and bounded timeouts.
 OTP codes expire after five minutes, are limited to five guesses and five
 messages per hour per address, and can be resent once per 60 seconds. Existing
 SQLite user accounts remain active; only newly registered users need OTP
-verification.
+verification. An OTP remains unusable until Resend accepts the request and its
+delivery status is saved; failed sends remain pending but can only be retried
+through the existing resend cooldown and rate limits.
 
-SMTP errors are categorized in backend logs without logging credentials,
-addresses, message content, or OTP values. A successful SMTP submission only
-means the SMTP server accepted the message for processing; it does not guarantee
-delivery to the recipient's inbox.
+Resend API failures are categorized in backend logs without logging credentials,
+addresses, message content, or OTP values. Resend accepting a request means it
+accepted the message for processing; it does not guarantee delivery to the
+recipient's inbox.
 
 ---
 

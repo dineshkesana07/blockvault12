@@ -114,6 +114,17 @@ int main() {
                 now + 300, now) == PendingSignupCreateStatus::Created,
             "create pending signup");
     checkOtpIsHashed(path, email, firstOtp);
+    require(database.verifyPendingSignupOtp(
+                email, hashOtp(email, firstOtp), now + 1, password).status ==
+                OtpVerificationStatus::Invalid,
+            "reject an OTP before email delivery is confirmed");
+    require(!database.isPendingSignupOtpDeliveryConfirmed(email),
+            "report pending OTP as undelivered");
+    require(database.confirmPendingSignupOtpDelivery(email,
+                                                     hashOtp(email, firstOtp)),
+            "confirm OTP delivery");
+    require(database.isPendingSignupOtpDeliveryConfirmed(email),
+            "report OTP as delivered after confirmation");
 
     for (int attempt = 0; attempt < 4; ++attempt) {
       require(database.verifyPendingSignupOtp(
@@ -135,6 +146,16 @@ int main() {
                 email, hashOtp(email, secondOtp), now + 360, now + 60) ==
                 OtpResendStatus::Updated,
             "resend after cooldown and rotate the previous OTP");
+    require(database.verifyPendingSignupOtp(
+                email, hashOtp(email, secondOtp), now + 61, password).status ==
+                OtpVerificationStatus::Invalid,
+            "reject a resent OTP until its email delivery is confirmed");
+    require(database.confirmPendingSignupOtpDelivery(email,
+                                                     hashOtp(email, secondOtp)),
+            "confirm resent OTP delivery");
+    require(!database.confirmPendingSignupOtpDelivery(
+                email, hashOtp(email, firstOtp)),
+            "do not confirm a stale OTP after resend");
     require(database.verifyPendingSignupOtp(
                 email, hashOtp(email, firstOtp), now + 61, password).status ==
                 OtpVerificationStatus::Invalid,
@@ -165,6 +186,9 @@ int main() {
                 hashOtp(expiredEmail, firstOtp), now + 300, now) ==
                 PendingSignupCreateStatus::Created,
             "create expiring signup");
+    require(database.confirmPendingSignupOtpDelivery(
+                expiredEmail, hashOtp(expiredEmail, firstOtp)),
+            "confirm expiring OTP delivery");
     require(database.verifyPendingSignupOtp(
                 expiredEmail, hashOtp(expiredEmail, firstOtp), now + 300,
                 password).status == OtpVerificationStatus::Expired,
@@ -195,6 +219,9 @@ int main() {
                 hashOtp(authEmail, firstOtp), now + 300, now) ==
                 PendingSignupCreateStatus::Created,
             "create signup for auth service verification");
+    require(database.confirmPendingSignupOtpDelivery(
+                authEmail, hashOtp(authEmail, firstOtp)),
+            "confirm auth service OTP delivery");
     auto authDatabase = std::make_shared<Database>(path.string());
     require(authDatabase->init(), "open database for auth service verification");
     Auth auth(authDatabase);

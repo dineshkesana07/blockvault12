@@ -245,7 +245,7 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
     }
     if (!OtpEmail::isConfigured()) {
         result.status = OtpFlowStatus::ConfigurationError;
-        result.message = "Email verification is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM_EMAIL on the backend.";
+        result.message = "Email verification is not configured. Set RESEND_API_KEY and OTP_FROM_EMAIL on the backend.";
         return result;
     }
 
@@ -295,7 +295,16 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
     result.status = OtpFlowStatus::Accepted;
     result.message = "If this email can be registered, a verification code has been submitted for delivery.";
     result.retry_after_seconds = 60;
-    if (createStatus != PendingSignupCreateStatus::Created) {
+    if (createStatus == PendingSignupCreateStatus::AlreadyRegistered) {
+        return result;
+    }
+    if (createStatus == PendingSignupCreateStatus::AlreadyPending) {
+        if (m_db->isPendingSignupOtpDeliveryConfirmed(email)) {
+            return result;
+        }
+        result.status = OtpFlowStatus::EmailError;
+        result.message =
+            "The verification email was not confirmed. Please request a new code after the cooldown.";
         return result;
     }
 
@@ -303,6 +312,15 @@ OtpFlowResult Auth::beginRegistration(const std::string& submittedName,
     if (!sent) {
         result.status = OtpFlowStatus::EmailError;
         result.message = "We could not send the verification email. Please try again later.";
+        result.retry_after_seconds = 60;
+        return result;
+    }
+    if (!m_db->confirmPendingSignupOtpDelivery(email, otpHash)) {
+        std::cerr << "[OTP email] Message was accepted but delivery status could "
+                     "not be confirmed in the database."
+                  << std::endl;
+        result.status = OtpFlowStatus::EmailError;
+        result.message = "We could not complete email verification. Please request a new code.";
         result.retry_after_seconds = 60;
     }
     return result;
@@ -323,7 +341,7 @@ OtpFlowResult Auth::resendRegistrationOtp(const std::string& submittedEmail) {
     }
     if (!OtpEmail::isConfigured()) {
         result.status = OtpFlowStatus::ConfigurationError;
-        result.message = "Email verification is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM_EMAIL on the backend.";
+        result.message = "Email verification is not configured. Set RESEND_API_KEY and OTP_FROM_EMAIL on the backend.";
         return result;
     }
 
@@ -367,6 +385,14 @@ OtpFlowResult Auth::resendRegistrationOtp(const std::string& submittedEmail) {
     if (!sent) {
         result.status = OtpFlowStatus::EmailError;
         result.message = "We could not send the verification email. Please try again later.";
+        return result;
+    }
+    if (!m_db->confirmPendingSignupOtpDelivery(email, otpHash)) {
+        std::cerr << "[OTP email] Message was accepted but delivery status could "
+                     "not be confirmed in the database."
+                  << std::endl;
+        result.status = OtpFlowStatus::EmailError;
+        result.message = "We could not complete email verification. Please request a new code.";
         return result;
     }
     result.status = OtpFlowStatus::Accepted;

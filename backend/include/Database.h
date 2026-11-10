@@ -12,37 +12,10 @@ struct UserRecord {
   int64_t id{0};
   std::string name;
   std::string email;
+  std::string google_subject;
   std::string password_hash;
   std::string vault_salt;
   std::string created_at;
-};
-
-enum class PendingSignupCreateStatus {
-  Created,
-  AlreadyRegistered,
-  AlreadyPending,
-  Error
-};
-
-enum class OtpResendStatus {
-  Updated,
-  NotFound,
-  Cooldown,
-  RateLimited,
-  Error
-};
-
-enum class OtpVerificationStatus {
-  Verified,
-  Invalid,
-  Expired,
-  TooManyAttempts,
-  Error
-};
-
-struct OtpVerificationResult {
-  OtpVerificationStatus status{OtpVerificationStatus::Error};
-  UserRecord user;
 };
 
 struct VaultEntryRecord {
@@ -92,24 +65,14 @@ public:
   // User operations (Prepared Statements)
   int64_t createUser(const std::string &name, const std::string &email,
                      const std::string &passwordHash,
-                     const std::string &vaultSalt);
+                     const std::string &vaultSalt,
+                     const std::string &googleSubject = "");
 
   std::optional<UserRecord> getUserByEmail(const std::string &email);
   std::optional<UserRecord> getUserById(int64_t id);
 
-  PendingSignupCreateStatus createPendingSignup(
-      const std::string &name, const std::string &email,
-      const std::string &passwordHash, const std::string &vaultSalt,
-      const std::string &otpHash, int64_t expiresAt, int64_t now);
-  OtpResendStatus refreshPendingSignupOtp(const std::string &email,
-                                          const std::string &otpHash,
-                                          int64_t expiresAt, int64_t now);
-  bool isPendingSignupOtpDeliveryConfirmed(const std::string &email);
-  bool confirmPendingSignupOtpDelivery(const std::string &email,
-                                       const std::string &otpHash);
-  OtpVerificationResult verifyPendingSignupOtp(
-      const std::string &email, const std::string &otpHash, int64_t now,
-      const std::string &masterPassword);
+  std::optional<UserRecord> getUserByGoogleSubject(const std::string &subject);
+  bool bindGoogleSubject(int64_t userId, const std::string &subject);
 
   // Vault operations (Prepared Statements)
   int64_t createVaultEntry(const VaultEntryRecord &entry);

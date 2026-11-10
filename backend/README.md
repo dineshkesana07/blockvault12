@@ -13,16 +13,16 @@ backend/
 ├── database/                   # SQLite storage directory
 │   └── blockvault.db           # Persistent SQLite database file
 ├── include/                    # Header definitions
-│   ├── Auth.h                  # User registration, login, token management
+│   ├── Auth.h                  # Google account linking and vault sessions
+│   ├── GoogleOAuth.h           # Google authorization-code exchange
 │   ├── Database.h              # SQLite connection, migrations, prepared statements
 │   ├── Encryption.h            # Libsodium Argon2id & XChaCha20-Poly1305
-│   ├── OtpEmail.h              # HTTPS Google Apps Script verification email
 │   ├── Middleware.h            # CORS middleware & Bearer token authentication
 │   └── Vault.h                 # Password manager CRUD & search/filter operations
 └── src/                        # Implementations
     ├── Auth.cpp
+    ├── GoogleOAuth.cpp
     ├── Database.cpp
-    ├── OtpEmail.cpp
     ├── Encryption.cpp
     ├── Middleware.cpp
     ├── Vault.cpp
@@ -35,8 +35,8 @@ backend/
 
 ### Prerequisites
 1. **MinGW-W64 / GCC 14+ or Clang** with C++17 support.
-2. **CMake 3.15+** and **Ninja** (or `mingw32-make`). The Windows build
-   downloads libcurl using CMake FetchContent; allow CMake network access.
+2. **CMake 3.15+** and **Ninja** (or `mingw32-make`). Windows builds fetch
+   libcurl with the platform TLS backend for Google OAuth HTTPS requests.
 
 ### Build Steps
 Open PowerShell in the `backend/` directory:
@@ -56,33 +56,36 @@ cd build
 ```
 The server starts on: **`http://127.0.0.1:10000`** by default.
 
-### Email verification configuration
+### Google OAuth setup
 
-Set `EMAIL_SERVICE_URL`, `EMAIL_SERVICE_TOKEN`, and a persistent random
-`OTP_HASH_SECRET` (at least 32 characters) in the backend environment.
-`EMAIL_SERVICE_URL` must be the deployed Google Apps Script web app URL using
-the `/macros/s/<deployment-id>/exec` path. The endpoint must accept a JSON POST
-with `token`, `email`, and `otp`, then return JSON containing `{"success":true}`
-only after `MailApp.sendEmail` succeeds. For local development, the server loads
-an optional `.env` from the current directory or its backend parent; when
-starting from `backend/build`, put the file at `backend/.env`. Values already
-set in the process environment take precedence. For Render, add
-`EMAIL_SERVICE_URL` and `EMAIL_SERVICE_TOKEN` under the service's Environment
-settings; the container does not include or load the repository `.env` file.
-Keep `EMAIL_SERVICE_TOKEN` on the backend and Apps Script only; never put it in
-`VITE_` variables or frontend configuration. The backend sends HTTPS requests
-with certificate verification, redirect following, and bounded timeouts.
-OTP codes expire after five minutes, are limited to five guesses and five
-messages per hour per address, and can be resent once per 60 seconds. Existing
-SQLite user accounts remain active; only newly registered users need OTP
-verification. An OTP remains unusable until Apps Script reports success and its
-delivery status is saved; failed sends remain pending but can only be retried
-through the existing resend cooldown and rate limits.
+Sign-in and signup use Google OAuth. A master password is still required to
+unlock vault encryption. Existing users must use their original master password
+and a Google account whose email matches their existing account on first sign-in.
+After linking, accounts are identified by Google's stable subject ID, so Google
+email changes do not create a second vault. No existing vault data is deleted.
 
-Email service failures are categorized in backend logs without logging service
-tokens, addresses, message content, or OTP values. Apps Script success means
-MailApp accepted the message for sending; it does not guarantee delivery to the
-recipient's inbox.
+1. In [Google Cloud Console](https://console.cloud.google.com/auth/clients), create
+   an OAuth client with application type **Web application** and configure its
+   consent screen. Add test users if the app is in testing mode.
+2. Add your frontend origins under **Authorized JavaScript origins**, such as
+   `http://localhost:5173` and your deployed frontend's HTTPS origin. For GIS popup
+   mode, add those same origins under **Authorized redirect URIs**; the code
+   exchange uses the requesting frontend origin as its redirect URI.
+3. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` on the backend (Render
+   Environment or local `backend/.env`). Never put the secret in frontend variables.
+4. Set `VITE_GOOGLE_CLIENT_ID` to the same public client ID in the frontend
+   environment. Set `VITE_API_BASE_URL` to your backend, then rebuild the frontend.
+5. Set backend `FRONTEND_ORIGIN` to your exact frontend origin (comma-separated
+   values are supported). Localhost ports 5173 and 5174 are allowed for development.
+
+The browser posts the single-use authorization code with `X-Requested-With:
+XMLHttpRequest`. The backend checks this header and the allowed origin, exchanges
+the code at Google's token endpoint, and retrieves the verified identity from
+Google's userinfo endpoint over certificate-verified HTTPS. Tokens are not stored.
+See [Google's code-model guide](https://developers.google.com/identity/oauth2/web/guides/use-code-model).
+Email OTP and standalone email/password login endpoints are removed.
+
+Run backend authentication checks with `ctest --test-dir build --output-on-failure`.
 
 ---
 
@@ -93,10 +96,7 @@ recipient's inbox.
 | Method | Endpoint | Auth Required | Description |
 | :--- | :--- | :--- | :--- |
 | **GET** | `/api/health` | No | Server status & version check |
-| **POST** | `/api/auth/signup` | No | Start registration and email a one-time code |
-| **POST** | `/api/auth/verify-otp` | No | Verify code and complete registration |
-| **POST** | `/api/auth/resend-otp` | No | Resend a code subject to cooldown/rate limits |
-| **POST** | `/api/auth/login` | No | Authenticate user & receive session token |
+| **POST** | `/api/auth/google` | No | Exchange Google code, create/link account, and unlock vault |
 | **POST** | `/api/auth/logout` | Yes (`Bearer`) | Revoke token and wipe memory keys |
 | **GET** | `/api/auth/me` | Yes (`Bearer`) | Retrieve current user profile |
 | **POST** | `/api/vault` | Yes (`Bearer`) | Encrypt & save new credential |
@@ -110,64 +110,22 @@ recipient's inbox.
 
 ### Postman Examples & Expected Responses
 
-#### 1. Start Registration
+#### 1. Google sign-in / signup
 * **Method**: `POST`
-* **URL**: `http://127.0.0.1:10000/api/auth/signup`
-* **Headers**: `Content-Type: application/json`
-* **Body** (Raw JSON):
-```json
-{
-  "name": "Maya Rao",
-  "email": "maya@proton.me",
-  "master_password": "SecretP@ssw0rd!"
-}
-```
-* **Expected Response (`202 Accepted`)** (the code is sent by email and is never returned by the API):
-```json
-{
-  "message": "If this email can be registered, a verification code has been submitted for delivery.",
-  "success": true,
-  "retry_after_seconds": 60
-}
-```
-
-#### 2. Verify Email
-* **Method**: `POST`
-* **URL**: `http://127.0.0.1:10000/api/auth/verify-otp`
+* **URL**: `http://127.0.0.1:10000/api/auth/google`
+* **Headers**: `Content-Type: application/json`, `Origin: http://localhost:5173`,
+  `X-Requested-With: XMLHttpRequest`
 * **Body**:
 ```json
 {
-  "email": "maya@proton.me",
-  "otp": "123456",
+  "code": "<fresh Google popup authorization code>",
   "master_password": "SecretP@ssw0rd!"
 }
 ```
-* A successful response creates the account and opens its vault session. Resend
-  with `POST /api/auth/resend-otp` and `{"email":"maya@proton.me"}`.
-
-#### 3. Login User
-* **Method**: `POST`
-* **URL**: `http://127.0.0.1:10000/api/auth/login`
-* **Body**:
-```json
-{
-  "email": "maya@proton.me",
-  "master_password": "SecretP@ssw0rd!"
-}
-```
-* **Expected Response (`200 OK`)**:
-```json
-{
-  "message": "Login successful.",
-  "success": true,
-  "token": "4df0587386de328765474c0a1f3a9ca0a3d6e24743ecac978bc15d2d8d4839ea",
-  "user": {
-    "email": "maya@proton.me",
-    "id": 1,
-    "name": "Maya Rao"
-  }
-}
-```
+A successful response contains `success`, `token`, and `user` (`id`, `name`,
+`email`). Google codes are single-use: failed attempts require a fresh Google
+popup authorization. New vault passwords require at least 8 characters including
+uppercase, lowercase, a number, and a symbol. Existing passwords remain valid.
 
 #### 4. Add Credential (Encrypted at Rest)
 * **Method**: `POST`

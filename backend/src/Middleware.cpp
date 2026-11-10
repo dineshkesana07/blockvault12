@@ -41,7 +41,7 @@ static std::unordered_set<std::string> getAllowedOrigins() {
     return origins;
 }
 
-static bool isOriginAllowed(const std::string& origin) {
+bool CORSMiddleware::isOriginAllowed(const std::string& origin) {
     const auto configured = getAllowedOrigins();
     return (configured.count(origin) != 0);
 }

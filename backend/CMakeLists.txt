@@ -53,7 +53,7 @@ else()
     set(SODIUM_TARGET PkgConfig::SODIUM)
 endif()
 
-# 4. libcurl for Resend HTTPS email delivery
+# 4. libcurl for Google OAuth HTTPS requests
 if(WIN32)
     FetchContent_Declare(
         curl
@@ -83,7 +83,7 @@ add_executable(blockvault_server
     src/main.cpp
     src/Database.cpp
     src/Auth.cpp
-    src/OtpEmail.cpp
+    src/GoogleOAuth.cpp
     src/Encryption.cpp
     src/Vault.cpp
     src/Middleware.cpp
@@ -127,22 +127,22 @@ else()
 endif()
 
 enable_testing()
-add_executable(blockvault_otp_database_tests
-    tests/OtpDatabaseTests.cpp
+add_executable(blockvault_auth_tests
+    tests/AuthTests.cpp
     src/Database.cpp
     src/Auth.cpp
-    src/OtpEmail.cpp
+    src/GoogleOAuth.cpp
     src/Encryption.cpp
 )
-target_include_directories(blockvault_otp_database_tests PRIVATE
+target_include_directories(blockvault_auth_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${sqlite3_SOURCE_DIR}
     ${SODIUM_INCLUDE_DIRS}
     ${json_SOURCE_DIR}/include
 )
-target_link_libraries(blockvault_otp_database_tests PRIVATE
+target_link_libraries(blockvault_auth_tests PRIVATE
     sqlite3_lib
     ${SODIUM_TARGET}
     CURL::libcurl
 )
-add_test(NAME otp_database_flow COMMAND blockvault_otp_database_tests)
+add_test(NAME auth_sessions COMMAND blockvault_auth_tests)

@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { Navigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -9,8 +8,8 @@ const ProtectedRoute = ({ children }) => {
   // Wait for authentication verification
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-black text-white">
-        Checking authentication...
+      <div className="min-h-screen flex items-center justify-center bg-bone">
+        <p className="text-stone font-sans text-sm">Verifying...</p>
       </div>
     );
   }

@@ -51,6 +51,7 @@ struct CORSMiddleware {
   void before_handle(crow::request &req, crow::response &res, context &ctx);
   void after_handle(crow::request &req, crow::response &res, context &ctx);
 
+  static bool isOriginAllowed(const std::string& origin);
   static void addCorsHeaders(const crow::request &req, crow::response &res);
 };
 

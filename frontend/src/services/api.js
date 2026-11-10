@@ -63,28 +63,11 @@ api.interceptors.response.use(
 
 // Authentication API methods
 export const authAPI = {
-  signup: (name, email, masterPassword) =>
-    api.post(resolveApiPath('/api/auth/signup'), {
-      name,
-      email,
+  googleLogin: (code, masterPassword) =>
+    api.post(resolveApiPath('/api/auth/google'), {
+      code,
       master_password: masterPassword,
-    }),
-
-  verifyOtp: (email, otp, masterPassword) =>
-    api.post(resolveApiPath('/api/auth/verify-otp'), {
-      email,
-      otp,
-      master_password: masterPassword,
-    }),
-
-  resendOtp: (email) =>
-    api.post(resolveApiPath('/api/auth/resend-otp'), { email }),
-
-  login: (email, masterPassword) =>
-    api.post(resolveApiPath('/api/auth/login'), {
-      email,
-      master_password: masterPassword,
-    }),
+    }, { headers: { 'X-Requested-With': 'XMLHttpRequest' }, timeout: 30000 }),
 
   logout: () =>
     api.post(resolveApiPath('/api/auth/logout')),

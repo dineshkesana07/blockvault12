@@ -115,38 +115,6 @@ crow::response jsonResponse(int status, const json &body) {
   return response;
 }
 
-crow::response otpFailureResponse(const OtpFlowResult &result) {
-  int status = 500;
-  switch (result.status) {
-  case OtpFlowStatus::Cooldown:
-  case OtpFlowStatus::RateLimited:
-  case OtpFlowStatus::TooManyAttempts:
-    status = 429;
-    break;
-  case OtpFlowStatus::Invalid:
-    status = 400;
-    break;
-  case OtpFlowStatus::Expired:
-    status = 410;
-    break;
-  case OtpFlowStatus::ConfigurationError:
-    status = 503;
-    break;
-  case OtpFlowStatus::EmailError:
-    status = 502;
-    break;
-  case OtpFlowStatus::Accepted:
-  case OtpFlowStatus::Error:
-    break;
-  }
-
-  json body = {{"success", false}, {"error", result.message}};
-  if (result.retry_after_seconds > 0) {
-    body["retry_after_seconds"] = result.retry_after_seconds;
-  }
-  return jsonResponse(status, body);
-}
-
 json authenticatedUserResponse(const AuthResult &result) {
   return {{"success", true},
           {"message", result.message},
@@ -213,9 +181,20 @@ int main() {
   // Authentication Endpoints
   // ==========================================
 
-  // POST /api/auth/signup
-  CROW_ROUTE(app, "/api/auth/signup")
+  // POST /api/auth/google
+  CROW_ROUTE(app, "/api/auth/google")
       .methods(crow::HTTPMethod::Post)([&auth](const crow::request &req) {
+        const std::string origin = req.get_header_value("Origin");
+        if (!CORSMiddleware::isOriginAllowed(origin) ||
+            req.get_header_value("X-Requested-With") != "XMLHttpRequest") {
+          return jsonResponse(403, {{"error", "Invalid sign-in request origin."}});
+        }
+        if (!GoogleOAuth::isConfigured()) {
+          return jsonResponse(503, {{"error", "Google sign-in is not configured on the server."}});
+        }
+        if (req.body.size() > 16384) {
+          return jsonResponse(413, {{"error", "Sign-in request is too large."}});
+        }
         json body;
         try {
           body = json::parse(req.body);
@@ -223,111 +202,25 @@ int main() {
           return jsonResponse(400, json({{"error", "Invalid JSON payload."}}));
         }
 
-        if (!body.is_object() || !body.contains("name") ||
-            !body["name"].is_string() || !body.contains("email") ||
-            !body["email"].is_string() || !body.contains("master_password") ||
+        if (!body.is_object() || !body.contains("code") ||
+            !body["code"].is_string() || !body.contains("master_password") ||
             !body["master_password"].is_string()) {
-          return jsonResponse(
-              400, json({{"success", false}, {"error", "Name, email, and password are required."}}));
+          return jsonResponse(400, {{"error", "Google authorization code and master password are required."}});
         }
-
-        OtpFlowResult result = auth->beginRegistration(
-            body["name"].get<std::string>(),
-            body["email"].get<std::string>(),
-            body["master_password"].get<std::string>());
-        if (result.status != OtpFlowStatus::Accepted) {
-          return otpFailureResponse(result);
-        }
-        return jsonResponse(
-            202, json({{"success", true},
-                       {"message", result.message},
-                       {"retry_after_seconds", result.retry_after_seconds}}));
-      });
-
-  // POST /api/auth/resend-otp
-  CROW_ROUTE(app, "/api/auth/resend-otp")
-      .methods(crow::HTTPMethod::Post)([&auth](const crow::request &req) {
-        json body;
-        try {
-          body = json::parse(req.body);
-        } catch (...) {
-          return jsonResponse(
-              400, json({{"success", false}, {"error", "Invalid JSON payload."}}));
-        }
-        if (!body.is_object() || !body.contains("email") ||
-            !body["email"].is_string()) {
-          return jsonResponse(
-              400, json({{"success", false}, {"error", "A valid email is required."}}));
-        }
-
-        OtpFlowResult result =
-            auth->resendRegistrationOtp(body["email"].get<std::string>());
-        if (result.status != OtpFlowStatus::Accepted) {
-          return otpFailureResponse(result);
-        }
-        return jsonResponse(
-            200, json({{"success", true},
-                       {"message", result.message},
-                       {"retry_after_seconds", result.retry_after_seconds}}));
-      });
-
-  // POST /api/auth/verify-otp
-  CROW_ROUTE(app, "/api/auth/verify-otp")
-      .methods(crow::HTTPMethod::Post)([&auth](const crow::request &req) {
-        json body;
-        try {
-          body = json::parse(req.body);
-        } catch (...) {
-          return jsonResponse(
-              400, json({{"success", false}, {"error", "Invalid JSON payload."}}));
-        }
-        if (!body.is_object() || !body.contains("email") ||
-            !body["email"].is_string() || !body.contains("otp") ||
-            !body["otp"].is_string() || !body.contains("master_password") ||
-            !body["master_password"].is_string()) {
-          return jsonResponse(
-              400, json({{"success", false}, {"error", "Email, password, and verification code are required."}}));
-        }
-
-        OtpFlowResult result = auth->verifyRegistrationOtp(
-            body["email"].get<std::string>(), body["otp"].get<std::string>(),
-            body["master_password"].get<std::string>());
-        if (result.status != OtpFlowStatus::Accepted) {
-          return otpFailureResponse(result);
-        }
-
-        SecureKey vaultKey = Encryption::deriveVaultKey(
-            body["master_password"].get<std::string>(), result.auth.vault_salt);
-        if (!vaultKey.isValid()) {
-          auth->logoutUser(result.auth.token);
-          return jsonResponse(
-              500, json({{"success", false}, {"error", "Failed to derive vault encryption key."}}));
-        }
-        SessionKeyStore::instance().storeKey(result.auth.token, std::move(vaultKey));
-        return jsonResponse(200, authenticatedUserResponse(result.auth));
-      });
-
-  // POST /api/auth/login
-  CROW_ROUTE(app, "/api/auth/login")
-      .methods(crow::HTTPMethod::Post)([&auth](const crow::request &req) {
-        json body;
-        try {
-          body = json::parse(req.body);
-        } catch (...) {
-          return jsonResponse(400, json({{"error", "Invalid JSON payload."}}));
-        }
-
-        if (!body.is_object() || !body.contains("email") ||
-            !body["email"].is_string() || !body.contains("master_password") ||
-            !body["master_password"].is_string()) {
-          return jsonResponse(
-              400, json({{"success", false}, {"error", "Email and password are required."}}));
-        }
-
-        std::string email = body["email"].get<std::string>();
+        std::string code = body["code"].get<std::string>();
         std::string masterPassword = body["master_password"].get<std::string>();
-
-        AuthResult result = auth->loginUser(email, masterPassword);
+        struct WipeCredentials {
+          std::string &code, &password;
+          ~WipeCredentials() { Encryption::wipeString(code); Encryption::wipeString(password); }
+        } wipe{code, masterPassword};
+        if (code.empty() || code.size() > 4096 || masterPassword.empty() || masterPassword.size() > 1024) {
+          return jsonResponse(400, {{"error", "Invalid authorization code or master password length."}});
+        }
+        const auto identity = GoogleOAuth::exchangeCode(code, origin);
+        if (!identity) {
+          return jsonResponse(401, {{"error", "Google sign-in failed. Please try again."}});
+        }
+        AuthResult result = auth->loginGoogle(*identity, masterPassword);
         if (!result.success) {
           return jsonResponse(401, json({{"error", result.message}}));
         }

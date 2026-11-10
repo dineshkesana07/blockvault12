@@ -22,12 +22,10 @@ services:
         value: "0.0.0.0"
       - key: FRONTEND_ORIGIN
         sync: false
-      - key: EMAIL_SERVICE_URL
+      - key: GOOGLE_CLIENT_ID
         sync: false
-      - key: EMAIL_SERVICE_TOKEN
+      - key: GOOGLE_CLIENT_SECRET
         sync: false
-      - key: OTP_HASH_SECRET
-        generateValue: true
     disk:
       name: blockvault-data
       mountPath: /var/data

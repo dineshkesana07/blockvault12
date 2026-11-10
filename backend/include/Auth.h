@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <chrono>
 #include "Database.h"
+#include "GoogleOAuth.h"
 
 /**
  * @brief Represents an active user session in memory.
@@ -32,27 +33,8 @@ struct AuthResult {
     std::string vault_salt; // Stored per-user random salt (internal C++ only, never returned to frontend)
 };
 
-enum class OtpFlowStatus {
-    Accepted,
-    Cooldown,
-    RateLimited,
-    Invalid,
-    Expired,
-    TooManyAttempts,
-    ConfigurationError,
-    EmailError,
-    Error
-};
-
-struct OtpFlowResult {
-    OtpFlowStatus status{OtpFlowStatus::Error};
-    std::string message;
-    int retry_after_seconds{0};
-    AuthResult auth;
-};
-
 /**
- * @brief Handles user authentication, registration, password hashing, and session management.
+ * @brief Handles user authentication, password hashing, and session management.
  */
 class Auth {
 public:
@@ -69,24 +51,14 @@ public:
     Auth(const Auth&) = delete;
     Auth& operator=(const Auth&) = delete;
 
-    OtpFlowResult beginRegistration(const std::string& name,
-                                    const std::string& email,
-                                    const std::string& masterPassword);
-
-    OtpFlowResult resendRegistrationOtp(const std::string& email);
-
-    OtpFlowResult verifyRegistrationOtp(const std::string& email,
-                                        const std::string& otp,
-                                        const std::string& masterPassword);
-
     /**
-     * @brief Authenticates an existing user and returns their stored vault salt for key derivation.
+     * @brief Creates or links a verified Google identity and unlocks its vault session.
      *
-     * @param email User's email address.
-     * @param masterPassword Master password entered by user.
+     * @param identity Identity verified by GoogleOAuth::exchangeCode, never client-supplied profile data.
+     * @param masterPassword Existing vault password, or a strong password for a new vault.
      * @return AuthResult with status, session token, and stored vault salt if successful.
      */
-    AuthResult loginUser(const std::string& email, const std::string& masterPassword);
+    AuthResult loginGoogle(const GoogleIdentity& identity, const std::string& masterPassword);
 
     /**
      * @brief Logs out a user by invalidating their session token.
@@ -150,9 +122,6 @@ private:
     mutable std::mutex m_sessionMutex;
     // Maps session_token -> SessionInfo
     std::unordered_map<std::string, SessionInfo> m_sessions;
-
-    OtpFlowResult createSessionForUser(const UserRecord& user,
-                                       const std::string& message);
 
     /**
      * @brief Cleans up expired sessions from the in-memory session map.

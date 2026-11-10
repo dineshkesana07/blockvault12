@@ -13,7 +13,6 @@ import {
   Check,
   Search,
   ExternalLink,
-  Lock,
   X,
   RefreshCw,
 } from 'lucide-react';
@@ -207,59 +206,52 @@ export default function Dashboard() {
   });
 
   return (
-    <div className="min-h-screen bg-black text-white p-6 md:p-10">
-      <div className="max-w-6xl mx-auto">
+    <div className="min-h-[calc(100vh-3.5rem)] bg-bone text-charcoal">
+      <div className="max-w-5xl mx-auto px-4 py-8 md:px-6">
         {/* Top Header */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
           <div>
-            <h1 className="text-3xl md:text-4xl font-extrabold text-white flex items-center gap-3">
-              <span className="p-2 bg-gradient-to-br from-accentPurple to-accentBlue rounded-lg">
-                <Lock className="w-7 h-7 text-white" />
-              </span>
-              BlockVault
-            </h1>
-            <p className="text-gray-400 mt-1">
-              Logged in as <span className="text-accentBlue font-medium">{user?.email || user?.name}</span>
+            <h1 className="font-serif font-bold text-2xl text-charcoal">Your vault</h1>
+            <p className="text-sm text-stone mt-1">
+              Logged in as <span className="text-charcoal font-medium">{user?.email || user?.name}</span>
             </p>
           </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleOpenAdd}
-              className="bg-accentPurple hover:bg-accentPurple/80 transition text-white px-4 py-2.5 rounded-lg font-semibold flex items-center gap-2 shadow-glass"
-            >
-              <Plus className="w-5 h-5" />
-              Add Credential
-            </button>
-          </div>
+          <button
+            onClick={handleOpenAdd}
+            className="bg-charcoal text-paper rounded px-4 py-2 text-sm font-medium hover:bg-ash duration-100 flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            Add Credential
+          </button>
         </div>
 
         {/* Notifications */}
         {successMsg && (
-          <div className="mb-6 p-4 bg-green-950/70 border border-green-500 text-green-300 text-sm rounded-lg flex items-center gap-2">
-            <Check className="w-4 h-4 text-green-400" />
+          <div className="mb-6 border border-charcoal/20 bg-charcoal/5 text-charcoal text-sm rounded p-3 flex items-center gap-2">
+            <Check className="w-4 h-4" />
             {successMsg}
           </div>
         )}
 
         {error && (
-          <div className="mb-6 p-4 bg-red-950/70 border border-red-500 text-red-300 text-sm rounded-lg flex items-center justify-between">
+          <div className="mb-6 border border-accent/40 bg-accent/5 text-accent text-sm rounded p-3 flex items-center justify-between">
             <span>{error}</span>
-            <button onClick={() => setError('')} className="text-red-400 hover:text-white">
+            <button onClick={() => setError('')} className="text-accent hover:text-accent-hover duration-100">
               <X className="w-4 h-4" />
             </button>
           </div>
         )}
 
         {/* Search & Category Filter Bar */}
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6 shadow-glass flex flex-col md:flex-row gap-4 justify-between items-center">
+        <div className="bg-paper border border-chalk rounded p-4 mb-6 flex flex-col md:flex-row gap-4 justify-between items-center">
           <div className="relative w-full md:w-96">
-            <Search className="absolute left-3.5 top-3 w-4 h-4 text-gray-400" />
+            <Search className="absolute left-3 top-2.5 w-4 h-4 text-stone" />
             <input
               type="text"
               placeholder="Search website, username, notes..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:border-accentPurple outline-none"
+              className="w-full pl-10 pr-4 py-2 bg-paper border border-chalk rounded text-charcoal text-sm placeholder:text-stone/60 focus:border-charcoal focus:outline-none"
             />
           </div>
 
@@ -268,10 +260,10 @@ export default function Dashboard() {
               <button
                 key={cat}
                 onClick={() => setSelectedCategory(cat)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                className={`px-3 py-1.5 rounded text-xs font-medium duration-100 ${
                   selectedCategory === cat
-                    ? 'bg-accentPurple text-white'
-                    : 'bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700'
+                    ? 'bg-charcoal text-paper'
+                    : 'border border-chalk text-stone hover:text-charcoal hover:border-charcoal'
                 }`}
               >
                 {cat}
@@ -280,38 +272,37 @@ export default function Dashboard() {
             <button
               onClick={fetchCredentials}
               title="Refresh Vault"
-              className="p-2 bg-gray-800 text-gray-400 hover:text-white rounded-lg hover:bg-gray-700 transition"
+              className="border border-chalk text-stone hover:text-charcoal hover:border-charcoal rounded p-2 duration-100"
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${loading ? 'motion-safe:animate-spin' : ''}`} />
             </button>
           </div>
         </div>
 
-        {/* Credentials Grid / List */}
-        <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden shadow-glass">
-          <div className="px-6 py-4 border-b border-gray-800 flex justify-between items-center">
-            <h2 className="text-lg font-bold text-white">Your Credentials</h2>
-            <span className="text-xs text-gray-400 bg-gray-800 px-2.5 py-1 rounded-full">
+        {/* Credentials List */}
+        <div className="bg-paper border border-chalk rounded overflow-hidden">
+          <div className="px-6 py-4 border-b border-chalk flex justify-between items-center">
+            <h2 className="text-sm font-medium text-charcoal uppercase tracking-wide">Credentials</h2>
+            <span className="text-xs text-stone">
               {filteredCredentials.length} item{filteredCredentials.length === 1 ? '' : 's'}
             </span>
           </div>
 
           {loading ? (
-            <div className="py-16 text-center text-gray-400 flex flex-col items-center justify-center gap-3">
-              <RefreshCw className="w-6 h-6 animate-spin text-accentPurple" />
-              <span>Fetching encrypted credentials from Render backend...</span>
+            <div className="py-16 text-center flex flex-col items-center justify-center gap-3">
+              <RefreshCw className="w-5 h-5 motion-safe:animate-spin text-stone" />
+              <span className="text-stone text-sm">Loading...</span>
             </div>
           ) : filteredCredentials.length === 0 ? (
-            <div className="py-16 text-center text-gray-500">
-              <p className="text-lg font-semibold text-gray-400">No credentials found</p>
-              <p className="text-sm mt-1">
+            <div className="py-16 text-center">
+              <p className="text-stone text-sm">
                 {searchTerm || selectedCategory !== 'All'
-                  ? 'Try adjusting your search query or filter.'
-                  : 'Your vault is currently empty. Add your first login above!'}
+                  ? 'No credentials match your search or filter.'
+                  : 'Your vault is empty. Add your first credential above.'}
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-gray-800">
+            <div>
               {filteredCredentials.map((cred) => {
                 const isPasswordRevealed = !!showPasswordMap[cred.id];
                 const isPwCopied = !!copiedMap[`pw-${cred.id}`];
@@ -320,68 +311,68 @@ export default function Dashboard() {
                 return (
                   <div
                     key={cred.id}
-                    className="p-5 hover:bg-gray-800/40 transition flex flex-col md:flex-row md:items-center justify-between gap-4"
+                    className="px-6 py-5 border-b border-chalk last:border-b-0 hover:bg-bone/50 duration-100 flex flex-col md:flex-row md:items-center justify-between gap-4"
                   >
                     {/* Left: Info */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-3">
                         <button
                           onClick={() => handleToggleFavorite(cred)}
-                          className={`transition ${
+                          className={`duration-100 ${
                             cred.is_favorite
-                              ? 'text-yellow-400 hover:text-yellow-500'
-                              : 'text-gray-600 hover:text-gray-400'
+                              ? 'text-accent'
+                              : 'text-stone hover:text-charcoal'
                           }`}
                           title={cred.is_favorite ? 'Favorited' : 'Add to favorites'}
                         >
-                          <Star className={`w-5 h-5 ${cred.is_favorite ? 'fill-yellow-400' : ''}`} />
+                          <Star className={`w-4 h-4 ${cred.is_favorite ? 'fill-accent' : ''}`} />
                         </button>
 
-                        <h3 className="font-bold text-lg text-white truncate">{cred.website}</h3>
+                        <h3 className="font-medium text-charcoal truncate">{cred.website}</h3>
 
                         {cred.website_url && (
                           <a
                             href={cred.website_url.startsWith('http') ? cred.website_url : `https://${cred.website_url}`}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-gray-500 hover:text-accentBlue transition"
+                            className="text-stone hover:text-charcoal duration-100"
                             title="Open URL"
                           >
-                            <ExternalLink className="w-4 h-4" />
+                            <ExternalLink className="w-3.5 h-3.5" />
                           </a>
                         )}
 
-                        <span className="text-xs bg-gray-800 border border-gray-700 text-gray-300 px-2 py-0.5 rounded">
+                        <span className="text-xs border border-chalk text-stone rounded px-2 py-0.5">
                           {cred.category || 'General'}
                         </span>
                       </div>
 
                       {/* Username & Password */}
-                      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
-                        <div className="flex items-center gap-2 bg-gray-950 px-3 py-1.5 rounded-lg border border-gray-800">
-                          <span className="text-gray-400 text-xs">User:</span>
-                          <span className="font-mono text-gray-200">{cred.username}</span>
+                      <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
+                        <div className="flex items-center gap-2 bg-bone px-3 py-1.5 rounded border border-chalk">
+                          <span className="text-stone text-xs">User:</span>
+                          <span className="font-mono text-sm text-charcoal">{cred.username}</span>
                           <button
                             onClick={() => handleCopy(cred.username, `u-${cred.id}`)}
-                            className="text-gray-400 hover:text-white transition ml-1"
+                            className="text-stone hover:text-charcoal duration-100 ml-1"
                             title="Copy Username"
                           >
                             {isUserCopied ? (
-                              <Check className="w-3.5 h-3.5 text-green-400" />
+                              <Check className="w-3.5 h-3.5 text-charcoal" />
                             ) : (
                               <Copy className="w-3.5 h-3.5" />
                             )}
                           </button>
                         </div>
 
-                        <div className="flex items-center gap-2 bg-gray-950 px-3 py-1.5 rounded-lg border border-gray-800">
-                          <span className="text-gray-400 text-xs">Password:</span>
-                          <span className="font-mono text-gray-200">
+                        <div className="flex items-center gap-2 bg-bone px-3 py-1.5 rounded border border-chalk">
+                          <span className="text-stone text-xs">Password:</span>
+                          <span className="font-mono text-sm text-charcoal">
                             {isPasswordRevealed ? cred.password : '••••••••••••'}
                           </span>
                           <button
                             onClick={() => toggleReveal(cred.id)}
-                            className="text-gray-400 hover:text-white transition ml-1"
+                            className="text-stone hover:text-charcoal duration-100 ml-1"
                             title={isPasswordRevealed ? 'Hide Password' : 'Show Password'}
                           >
                             {isPasswordRevealed ? (
@@ -392,11 +383,11 @@ export default function Dashboard() {
                           </button>
                           <button
                             onClick={() => handleCopy(cred.password, `pw-${cred.id}`)}
-                            className="text-gray-400 hover:text-white transition"
+                            className="text-stone hover:text-charcoal duration-100"
                             title="Copy Password"
                           >
                             {isPwCopied ? (
-                              <Check className="w-3.5 h-3.5 text-green-400" />
+                              <Check className="w-3.5 h-3.5 text-charcoal" />
                             ) : (
                               <Copy className="w-3.5 h-3.5" />
                             )}
@@ -405,24 +396,24 @@ export default function Dashboard() {
                       </div>
 
                       {cred.notes && (
-                        <p className="mt-2 text-xs text-gray-400 line-clamp-1 italic">
+                        <p className="mt-2 text-xs text-stone italic line-clamp-1">
                           Note: {cred.notes.replace('[FAVORITE]', '').trim()}
                         </p>
                       )}
                     </div>
 
                     {/* Right: Actions */}
-                    <div className="flex items-center gap-2 self-end md:self-center">
+                    <div className="flex items-center gap-1 self-end md:self-center">
                       <button
                         onClick={() => handleOpenEdit(cred)}
-                        className="p-2 text-gray-400 hover:text-accentBlue hover:bg-gray-800 rounded-lg transition"
+                        className="p-2 text-stone hover:text-charcoal duration-100"
                         title="Edit Credential"
                       >
                         <Edit2 className="w-4 h-4" />
                       </button>
                       <button
                         onClick={() => setDeleteTarget(cred)}
-                        className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-800 rounded-lg transition"
+                        className="p-2 text-stone hover:text-accent duration-100"
                         title="Delete Credential"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -438,29 +429,29 @@ export default function Dashboard() {
 
       {/* Add / Edit Credential Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-gray-900 border border-gray-700 w-full max-w-lg rounded-xl shadow-2xl p-6">
-            <div className="flex justify-between items-center mb-5 pb-3 border-b border-gray-800">
-              <h3 className="text-xl font-bold text-white">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-charcoal/60">
+          <div className="bg-paper border border-chalk w-full max-w-lg rounded p-6">
+            <div className="flex justify-between items-center mb-5 pb-3 border-b border-chalk">
+              <h3 className="text-lg font-serif font-bold text-charcoal">
                 {editingCred ? 'Edit Credential' : 'Add New Credential'}
               </h3>
               <button
                 onClick={() => setIsModalOpen(false)}
-                className="text-gray-400 hover:text-white transition"
+                className="text-stone hover:text-charcoal duration-100"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {modalError && (
-              <div className="mb-4 p-3 bg-red-950/70 border border-red-500 text-red-300 text-sm rounded-lg">
+              <div className="mb-4 border border-accent/40 bg-accent/5 text-accent text-sm rounded p-3">
                 {modalError}
               </div>
             )}
 
             <form onSubmit={handleSaveModal} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase mb-1.5">
+                <label className="block text-xs font-medium text-stone uppercase tracking-wide mb-1.5">
                   Website / Service Name *
                 </label>
                 <input
@@ -469,12 +460,12 @@ export default function Dashboard() {
                   required
                   value={modalForm.website}
                   onChange={(e) => setModalForm({ ...modalForm, website: e.target.value })}
-                  className="w-full px-3.5 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:border-accentPurple outline-none"
+                  className="w-full px-3 py-2 bg-paper border border-chalk rounded text-charcoal text-sm placeholder:text-stone/60 focus:border-charcoal focus:outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase mb-1.5">
+                <label className="block text-xs font-medium text-stone uppercase tracking-wide mb-1.5">
                   Website URL (Optional)
                 </label>
                 <input
@@ -482,13 +473,13 @@ export default function Dashboard() {
                   placeholder="https://example.com"
                   value={modalForm.website_url}
                   onChange={(e) => setModalForm({ ...modalForm, website_url: e.target.value })}
-                  className="w-full px-3.5 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:border-accentPurple outline-none"
+                  className="w-full px-3 py-2 bg-paper border border-chalk rounded text-charcoal text-sm placeholder:text-stone/60 focus:border-charcoal focus:outline-none"
                 />
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-xs font-semibold text-gray-300 uppercase mb-1.5">
+                  <label className="block text-xs font-medium text-stone uppercase tracking-wide mb-1.5">
                     Username / Email *
                   </label>
                   <input
@@ -497,18 +488,18 @@ export default function Dashboard() {
                     required
                     value={modalForm.username}
                     onChange={(e) => setModalForm({ ...modalForm, username: e.target.value })}
-                    className="w-full px-3.5 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:border-accentPurple outline-none"
+                    className="w-full px-3 py-2 bg-paper border border-chalk rounded text-charcoal text-sm placeholder:text-stone/60 focus:border-charcoal focus:outline-none"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-gray-300 uppercase mb-1.5">
+                  <label className="block text-xs font-medium text-stone uppercase tracking-wide mb-1.5">
                     Category
                   </label>
                   <select
                     value={modalForm.category}
                     onChange={(e) => setModalForm({ ...modalForm, category: e.target.value })}
-                    className="w-full px-3.5 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:border-accentPurple outline-none"
+                    className="w-full px-3 py-2 bg-paper border border-chalk rounded text-charcoal text-sm focus:border-charcoal focus:outline-none"
                   >
                     <option value="General">General</option>
                     <option value="Work">Work</option>
@@ -521,7 +512,7 @@ export default function Dashboard() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase mb-1.5">
+                <label className="block text-xs font-medium text-stone uppercase tracking-wide mb-1.5">
                   Password *
                 </label>
                 <input
@@ -530,12 +521,12 @@ export default function Dashboard() {
                   required
                   value={modalForm.password}
                   onChange={(e) => setModalForm({ ...modalForm, password: e.target.value })}
-                  className="w-full px-3.5 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:border-accentPurple outline-none"
+                  className="w-full px-3 py-2 bg-paper border border-chalk rounded text-charcoal text-sm placeholder:text-stone/60 focus:border-charcoal focus:outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase mb-1.5">
+                <label className="block text-xs font-medium text-stone uppercase tracking-wide mb-1.5">
                   Notes (Optional)
                 </label>
                 <textarea
@@ -543,7 +534,7 @@ export default function Dashboard() {
                   placeholder="Additional recovery keys, 2FA notes, etc."
                   value={modalForm.notes}
                   onChange={(e) => setModalForm({ ...modalForm, notes: e.target.value })}
-                  className="w-full px-3.5 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-white focus:border-accentPurple outline-none"
+                  className="w-full px-3 py-2 bg-paper border border-chalk rounded text-charcoal text-sm placeholder:text-stone/60 focus:border-charcoal focus:outline-none"
                 />
               </div>
 
@@ -553,28 +544,28 @@ export default function Dashboard() {
                   id="modalFav"
                   checked={modalForm.is_favorite}
                   onChange={(e) => setModalForm({ ...modalForm, is_favorite: e.target.checked })}
-                  className="w-4 h-4 rounded text-accentPurple bg-gray-800 border-gray-700 focus:ring-accentPurple"
+                  className="w-4 h-4 rounded accent-[#1C1C1E]"
                 />
-                <label htmlFor="modalFav" className="text-sm text-gray-300 cursor-pointer">
+                <label htmlFor="modalFav" className="text-sm text-charcoal cursor-pointer">
                   Mark as Favorite
                 </label>
               </div>
 
-              <div className="flex justify-end gap-3 pt-4 border-t border-gray-800">
+              <div className="flex justify-end gap-3 pt-4 border-t border-chalk">
                 <button
                   type="button"
                   onClick={() => setIsModalOpen(false)}
                   disabled={modalSaving}
-                  className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm font-medium transition"
+                  className="border border-chalk text-charcoal rounded px-4 py-2 text-sm hover:border-charcoal duration-100"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={modalSaving}
-                  className="px-5 py-2 bg-accentPurple hover:bg-accentPurple/80 text-white rounded-lg text-sm font-semibold transition disabled:opacity-50"
+                  className="bg-charcoal text-paper rounded px-5 py-2 text-sm font-medium hover:bg-ash duration-100 disabled:opacity-50"
                 >
-                  {modalSaving ? 'Encrypting & Saving...' : editingCred ? 'Update Entry' : 'Save to Vault'}
+                  {modalSaving ? 'Saving...' : editingCred ? 'Update Entry' : 'Save to Vault'}
                 </button>
               </div>
             </form>
@@ -584,25 +575,25 @@ export default function Dashboard() {
 
       {/* Delete Confirmation Modal */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-          <div className="bg-gray-900 border border-gray-700 w-full max-w-md rounded-xl p-6 shadow-2xl">
-            <h3 className="text-lg font-bold text-white mb-2">Delete Credential?</h3>
-            <p className="text-sm text-gray-400 mb-6">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-charcoal/60">
+          <div className="bg-paper border border-chalk w-full max-w-sm rounded p-6">
+            <h3 className="text-lg font-serif font-bold text-charcoal mb-2">Delete Credential?</h3>
+            <p className="text-sm text-stone mb-6">
               Are you sure you want to delete the credentials for{' '}
-              <span className="font-semibold text-white">{deleteTarget.website}</span>? This action cannot be undone.
+              <span className="font-medium text-charcoal">{deleteTarget.website}</span>? This action cannot be undone.
             </p>
             <div className="flex justify-end gap-3">
               <button
                 onClick={() => setDeleteTarget(null)}
                 disabled={deleting}
-                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-sm font-medium"
+                className="border border-chalk text-charcoal rounded px-4 py-2 text-sm hover:border-charcoal duration-100"
               >
                 Cancel
               </button>
               <button
                 onClick={handleDeleteConfirm}
                 disabled={deleting}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold transition disabled:opacity-50"
+                className="bg-accent text-paper rounded px-4 py-2 text-sm font-medium hover:bg-accent-hover duration-100 disabled:opacity-50"
               >
                 {deleting ? 'Deleting...' : 'Delete'}
               </button>
